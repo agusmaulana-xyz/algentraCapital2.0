@@ -66,7 +66,7 @@ Persiapan:
 
 1. Pasang Algentra dan worker pada Windows Server yang dikelola sendiri. Atur `COPIER_WORKER_API_KEY` ke random secret minimal 32 karakter di `.env` backend dan environment akun Windows yang menjalankan worker. Jangan gunakan kunci contoh.
 2. Siapkan terminal MT5 master untuk `master.json` seperti pada konfigurasi standalone, termasuk password lewat environment variable sendiri dan `folder_sinyal` yang bisa diakses worker.
-3. Siapkan folder terminal follower bersih yang berisi `terminal64.exe`. Jangan gunakan folder master, folder terminal client yang sudah login, atau folder yang berisi sesi akun lain. Worker menggandakan folder ini ke `runtime/terminals/<account_id>` dan menjalankan satu proses portable per client.
+3. Siapkan folder terminal follower bersih yang berisi `terminal64.exe`. Jangan gunakan folder master, folder terminal client yang sudah login, atau folder yang berisi sesi akun lain. Worker menggandakan folder ini ke `runtime/terminals/<account_id>`, mengaktifkan izin Auto Trading terminal pada konfigurasi portable, dan menjalankan satu proses per client. Saat client menyimpan kredensial di portal, worker memvalidasi login terlebih dahulu tanpa mengirim order; aktivasi copy live diblokir sampai validasi berhasil.
 4. Salin config worker dan sesuaikan endpoint, terminal template, dan folder runtime:
 
    ```powershell
@@ -80,6 +80,14 @@ Persiapan:
    ```
 
 Worker menjalankan publisher master, memeriksa daftar job aktif tiap beberapa detik, membuat terminal terisolasi, dan melaporkan heartbeat, saldo, posisi terbuka, serta deal MT5 ke portal. Saat job baru mulai, worker mengirim histori deal 30 hari terakhir per batch maksimal 100 deal, kemudian melanjutkan dari cursor terakhir. Untuk VPS, tetap jalankan worker sebagai Scheduled Task/Windows Service dan sediakan `COPIER_WORKER_API_KEY` pada environment akun Windows; jangan jalankan `launcher.py` bersamaan karena worker managed sudah menjalankan publisher master sendiri. File konfigurasi follower di runtime tidak memuat password; password disuntikkan ke environment proses follower saat start. Worker API key dan password akun lain difilter dari environment child process. Log worker tidak mencatat request body atau environment.
+
+Untuk memasang managed worker otomatis saat Windows startup, jalankan PowerShell sebagai akun layanan VPS:
+
+```powershell
+.\scripts\install_managed_worker_task.ps1 -ProjectRoot "C:\Path\To\algentraCapitalProject" -PythonPath "C:\Path\To\python.exe"
+```
+
+Task **Algentra Managed Copy Worker** berjalan dengan hak tertinggi akun Windows yang memasangnya, membaca worker key dari `.env`, dan dimulai ulang oleh Task Scheduler jika proses berhenti.
 
 Client dapat menjeda copy kapan saja dari portal. Menjeda atau menghapus profil menghentikan copier, tetapi posisi yang sudah terbuka tetap ada pada akun broker dan tidak ditutup otomatis. Menghapus akun dari portal membuat worker membersihkan folder terminal, state, dan konfigurasi follower milik akun tersebut pada sinkronisasi berikutnya. Uji end-to-end hanya dengan akun demo dahulu; worker aktif akan menggunakan `dry_run: false` setelah client menyetujuinya di portal.
 

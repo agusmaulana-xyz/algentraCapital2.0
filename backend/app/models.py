@@ -202,6 +202,8 @@ class ManagedCopyProfile(Base):
     max_lot_per_order: Mapped[float] = mapped_column(Float, default=0.05, nullable=False)
     max_lot_total: Mapped[float] = mapped_column(Float, default=0.10, nullable=False)
     max_open_positions: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    login_status: Mapped[str] = mapped_column(String(24), default="UNCHECKED", nullable=False)
+    login_message: Mapped[str | None] = mapped_column(String(240), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="PAUSED", nullable=False)
     status_message: Mapped[str | None] = mapped_column(String(240), nullable=True)

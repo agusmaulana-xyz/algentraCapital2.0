@@ -24,6 +24,58 @@ from .logging_setup import configure_logging
 logger = logging.getLogger("managed_worker")
 
 
+def enable_terminal_auto_trading(terminal_dir: str | Path) -> Path:
+    """Enable MT5 terminal-level algo trading in a portable terminal copy."""
+    config_path = Path(terminal_dir) / "Config" / "common.ini"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    raw = config_path.read_bytes() if config_path.exists() else b""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encoding = "utf-16"
+        text = raw.decode(encoding)
+    else:
+        encoding = "utf-8-sig"
+        text = raw.decode(encoding) if raw else ""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    output: list[str] = []
+    experts_seen = False
+    keys = {
+        "allowlivetrading": "AllowLiveTrading=1",
+        "enabled": "Enabled=1",
+        "account": "Account=0",
+        "profile": "Profile=0",
+    }
+    present: set[str] = set()
+    in_experts = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_experts:
+                output.extend(value for key, value in keys.items() if key not in present)
+            in_experts = stripped[1:-1].casefold() == "experts"
+            experts_seen = experts_seen or in_experts
+            present = set()
+            output.append(line)
+            continue
+        if in_experts and "=" in stripped and not stripped.startswith((";", "#")):
+            key = stripped.split("=", 1)[0].strip().casefold()
+            if key in keys:
+                output.append(keys[key])
+                present.add(key)
+                continue
+        output.append(line)
+    if in_experts:
+        output.extend(value for key, value in keys.items() if key not in present)
+    if not experts_seen:
+        if output and output[-1].strip():
+            output.append("")
+        output.extend(("[Experts]", *keys.values()))
+    temporary = config_path.with_suffix(".ini.tmp")
+    temporary.write_bytes((newline.join(output) + newline).encode(encoding))
+    temporary.replace(config_path)
+    return config_path
+
+
 def _resolve(base: Path, value: str) -> Path:
     candidate = Path(value)
     return candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
@@ -193,6 +245,7 @@ class ManagedWorker:
             shutil.copytree(self.template_dir, account_dir)
         if not terminal.is_file():
             raise RuntimeError("Salinan terminal follower tidak lengkap")
+        enable_terminal_auto_trading(account_dir)
         password_env = f"ALGENTRA_MANAGED_{account_id}_PASSWORD"
         config_path = self.configs_dir / f"{name}.json"
         heartbeat_dir = self.heartbeats_dir
@@ -234,6 +287,55 @@ class ManagedWorker:
         src = str(Path(__file__).resolve().parents[1])
         env["PYTHONPATH"] = src + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         return config_path, env, self.heartbeats_dir / f"heartbeat_{name}.txt"
+
+    def _validate_login(self, job: dict[str, Any]) -> tuple[bool, str]:
+        """Check broker authentication in the isolated terminal without placing orders."""
+        account_id = int(job["account_id"])
+        account_dir = self.terminals_dir / str(account_id)
+        terminal = account_dir / "terminal64.exe"
+        if not terminal.is_file():
+            shutil.copytree(self.template_dir, account_dir)
+        if not terminal.is_file():
+            return False, "Terminal follower tidak tersedia pada server."
+        enable_terminal_auto_trading(account_dir)
+        password_env = f"ALGENTRA_MANAGED_{account_id}_PASSWORD"
+        try:
+            import MetaTrader5 as mt5  # type: ignore[import-not-found]
+        except ImportError:
+            return False, "Package MetaTrader5 tidak tersedia pada worker Windows."
+        try:
+            options = {
+                "path": str(terminal),
+                "login": int(job["login"]),
+                "password": str(job["broker_password"]),
+                "server": str(job["server"]),
+                "portable": True,
+                "timeout": 30000,
+            }
+            if not mt5.initialize(**options):
+                error = mt5.last_error()
+                if error and error[0] == -6:
+                    return False, "Login gagal. Periksa nomor akun, password trading, dan nama server broker."
+                return False, "Terminal MT5 gagal tersambung ke broker. Periksa koneksi server broker."
+            account = mt5.account_info()
+            terminal_info = mt5.terminal_info()
+            if account is None or terminal_info is None or not getattr(terminal_info, "connected", False):
+                return False, "Login belum terhubung ke server broker. Periksa akun dan nama server."
+            if str(getattr(account, "login", "")) != str(job["login"]):
+                return False, "Terminal terhubung ke nomor akun yang berbeda dari yang dimasukkan."
+            if not getattr(account, "trade_allowed", False):
+                return False, "Login berhasil, tetapi broker menolak izin trading akun ini."
+            if not getattr(terminal_info, "trade_allowed", False):
+                return False, "Login berhasil, tetapi izin Auto Trading terminal belum aktif."
+            return True, "Login broker berhasil dan terminal siap untuk copy trading."
+        except Exception as exc:
+            logger.warning("Validasi login MT5 akun %s gagal (%s)", account_id, type(exc).__name__)
+            return False, "Worker tidak dapat memvalidasi login pada terminal MT5."
+        finally:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
 
     def _start_job(self, job: dict[str, Any], now: float) -> ManagedChild:
         account_id = int(job["account_id"])
@@ -306,6 +408,27 @@ class ManagedWorker:
         managed_account_ids = response.get("managed_account_ids")
         if not isinstance(managed_account_ids, list) or any(not isinstance(value, int) or value <= 0 for value in managed_account_ids):
             raise RuntimeError("API worker tidak mengembalikan daftar akun managed yang valid")
+        login_checks = response.get("login_checks", [])
+        if not isinstance(login_checks, list):
+            raise RuntimeError("API worker tidak mengembalikan daftar pemeriksaan login yang valid")
+        for check in login_checks:
+            if not isinstance(check, dict):
+                continue
+            account_id = int(check.get("account_id", 0))
+            if account_id <= 0:
+                continue
+            try:
+                valid, message = self._validate_login(check)
+            except Exception as exc:
+                logger.exception("Pemeriksaan login MT5 akun %s gagal", account_id)
+                valid, message = False, f"Pemeriksaan login gagal ({type(exc).__name__})."
+            try:
+                self._request(
+                    f"/api/mt5/copier/jobs/{account_id}/login-check",
+                    {"valid": valid, "message": message},
+                )
+            except RuntimeError as exc:
+                logger.warning("Hasil pemeriksaan login akun %s tidak terkirim (%s)", account_id, type(exc).__name__)
         desired: dict[int, dict[str, Any]] = {}
         used_accounts: set[tuple[str, str]] = set()
         for job in jobs:

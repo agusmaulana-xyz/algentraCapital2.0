@@ -86,6 +86,11 @@ class ManagedCopyWorkerStatus(BaseModel):
     message: str | None = Field(default=None, max_length=240)
 
 
+class ManagedCopyLoginCheckResult(BaseModel):
+    valid: bool
+    message: str = Field(min_length=1, max_length=240)
+
+
 class CSChatMessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
 

@@ -107,6 +107,7 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
         assert setup.status_code == 200
         assert setup.json()["configured"] is True
         assert "broker_password" not in setup.json()
+        assert setup.json()["login_status"] == "CHECKING"
 
         with SessionLocal() as db:
             profile = db.get(ManagedCopyProfile, account_id)
@@ -114,10 +115,50 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
             assert profile.password_ciphertext != "broker-secret-for-test"
             assert decrypt_managed_copy_password(profile.password_ciphertext) == "broker-secret-for-test"
 
+        invalid_check = client.post(
+            f"/api/mt5/copier/jobs/{account_id}/login-check",
+            headers=worker_headers,
+            json={"valid": False, "message": "Login gagal. Periksa nomor akun, password trading, dan nama server broker."},
+        )
+        assert invalid_check.status_code == 200
+        rejected_start = client.put(
+            f"/api/mt5/accounts/{account_id}/managed-copy/active",
+            headers=csrf,
+            json={"active": True, "acknowledge_live_risk": True},
+        )
+        assert rejected_start.status_code == 409
+        assert "belum lolos pemeriksaan" in rejected_start.json()["detail"]
+        setup = client.put(
+            f"/api/mt5/accounts/{account_id}/managed-copy",
+            headers=csrf,
+            json={
+                "broker_password": "broker-secret-for-test",
+                "follower_symbol": "XAUUSDm",
+                "mode_lot": "rasio",
+                "ratio_lot": 0.5,
+                "lot_tetap": 0.01,
+                "max_lot_per_order": 0.05,
+                "max_lot_total": 0.1,
+                "max_open_positions": 3,
+            },
+        )
+        assert setup.status_code == 200
+        assert setup.json()["login_status"] == "CHECKING"
+
         jobs = client.get("/api/mt5/copier/jobs", headers=worker_headers)
         assert jobs.status_code == 200
         assert jobs.headers["cache-control"] == "no-store"
         assert jobs.json()["jobs"] == []
+        assert jobs.json()["login_checks"][0]["account_id"] == account_id
+        check_result = client.post(
+            f"/api/mt5/copier/jobs/{account_id}/login-check",
+            headers=worker_headers,
+            json={"valid": True, "message": "Login broker berhasil dan terminal siap untuk copy trading."},
+        )
+        assert check_result.status_code == 200
+        assert check_result.json()["status"] == "VALID"
+        assert "broker_password" not in client.get("/api/mt5/accounts").text
+        assert client.get("/api/mt5/copier/jobs", headers=worker_headers).json()["login_checks"] == []
         assert client.get("/api/mt5/copier/jobs", headers={"X-Copier-Worker-Key": "wrong"}).status_code == 401
 
         start_path = f"/api/mt5/accounts/{account_id}/managed-copy/active"
@@ -148,6 +189,7 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
             headers=worker_headers,
             json={"status": "RUNNING", "message": None},
         ).status_code == 200
+        assert client.get("/api/mt5/accounts").json()[0]["managed_copy"]["login_status"] == "VALID"
         account_report = client.post(
             f"/api/mt5/copier/jobs/{account_id}/report",
             headers=worker_headers,

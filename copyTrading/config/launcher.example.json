@@ -1,7 +1,0 @@
-{
-  "master_config": "master.json",
-  "followers": ["akun1.json"],
-  "check_interval_seconds": 5,
-  "heartbeat_timeout_seconds": 30,
-  "max_restarts_per_10_minutes": 10
-}

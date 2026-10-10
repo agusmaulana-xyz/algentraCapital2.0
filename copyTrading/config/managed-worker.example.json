@@ -1,9 +1,0 @@
-{
-  "api_base_url": "https://algentracapital.my.id",
-  "worker_api_key_env": "COPIER_WORKER_API_KEY",
-  "master_config": "master.json",
-  "terminal_template_dir": "C:\\MT5_Template",
-  "runtime_dir": "../runtime",
-  "poll_seconds": 5,
-  "heartbeat_timeout_seconds": 45
-}

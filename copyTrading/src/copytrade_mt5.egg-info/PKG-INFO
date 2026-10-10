@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: copytrade-mt5
+Version: 1.0.0
+Summary: One-process-per-terminal MetaTrader 5 copy trading system
+Requires-Python: >=3.10
+Requires-Dist: MetaTrader5>=5.0.45; platform_system == "Windows"

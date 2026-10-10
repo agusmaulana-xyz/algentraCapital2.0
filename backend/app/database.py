@@ -102,6 +102,17 @@ def migrate_schema() -> None:
                 connection.execute(
                     text("ALTER TABLE payment_orders ADD COLUMN execution_mode VARCHAR(16) NOT NULL DEFAULT 'EA'")
                 )
+    if "managed_copy_profiles" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("managed_copy_profiles")}
+        additions = {
+            "login_status": "VARCHAR(24) NOT NULL DEFAULT 'UNCHECKED'",
+            "login_message": "VARCHAR(240)",
+        }
+        missing = {name: sql_type for name, sql_type in additions.items() if name not in columns}
+        if missing:
+            with engine.begin() as connection:
+                for name, sql_type in missing.items():
+                    connection.execute(text(f"ALTER TABLE managed_copy_profiles ADD COLUMN {name} {sql_type}"))
 
 
 def get_db() -> Generator[Session, None, None]:

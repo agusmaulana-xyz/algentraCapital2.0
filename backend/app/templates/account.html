@@ -156,6 +156,15 @@ function addManagedAccountCard(card, account, plan) {
   const profile = account.managed_copy || {configured:false, active:false, status:"SETUP_REQUIRED"};
   const state = document.createElement("p"); state.className = "muted";
   state.textContent = `${profile.active ? "Copy aktif" : "Copy dijeda"} · Worker terakhir terhubung: ${profile.last_seen_at ? new Date(profile.last_seen_at).toLocaleString("id-ID", {timeZone:"Asia/Jakarta"}) : "belum terhubung"}`;
+  const loginState = document.createElement("p"); loginState.className = "account-login-check"; loginState.setAttribute("role", "status"); loginState.setAttribute("aria-live", "polite");
+  const loginMessages = {
+    UNCHECKED: "Login broker belum diperiksa. Simpan kredensial untuk memulai pemeriksaan otomatis.",
+    CHECKING: "Sedang memeriksa login broker dan kesiapan terminal MT5…",
+    VALID: profile.login_message || "Login broker berhasil dan terminal siap.",
+    ERROR: profile.login_message || "Login belum berhasil. Periksa nomor akun, password trading, dan server broker."
+  };
+  loginState.textContent = loginMessages[profile.login_status] || loginMessages.UNCHECKED;
+  loginState.classList.add(profile.login_status === "VALID" ? "account-login-check--valid" : profile.login_status === "ERROR" ? "account-login-check--error" : "account-login-check--pending");
   const stateLabels = {
     SETUP_REQUIRED: "Masukkan password broker dan atur batas copy terlebih dahulu.",
     PAUSED: "Copy trading dijeda. Tidak ada order baru yang dikirim.",
@@ -213,7 +222,7 @@ function addManagedAccountCard(card, account, plan) {
     try {
       await api(`/api/mt5/accounts/${account.id}/managed-copy`, {method:"PUT", body:JSON.stringify(data)});
       managedFormDirty = false;
-      statusBox.textContent = "Pengaturan tersimpan. Copy trading masih dijeda.";
+      statusBox.textContent = "Pengaturan tersimpan. Login broker sedang diperiksa otomatis; copy trading masih dijeda.";
       await loadAccounts();
     } catch (error) { statusBox.textContent = error.message; }
   });
@@ -222,7 +231,7 @@ function addManagedAccountCard(card, account, plan) {
   const toggle = document.createElement("button"); toggle.type = "button";
   toggle.className = profile.active ? "secondary" : "";
   toggle.textContent = profile.active ? "Jeda copy trading" : "Mulai copy trading (live)";
-  toggle.disabled = !profile.configured || (!profile.active && !managedWorkerReady);
+  toggle.disabled = !profile.configured || (!profile.active && (!managedWorkerReady || profile.login_status !== "VALID"));
   toggle.addEventListener("click", async () => {
     const active = !profile.active;
     if (active && !confirm("Konfirmasi: job ini akan mengirim order live ke akun broker Anda. Pastikan akun demo sudah diuji, login/server benar, serta batas lot dan posisi sesuai. Lanjutkan?")) return;
@@ -247,7 +256,7 @@ function addManagedAccountCard(card, account, plan) {
   balanceTime.textContent = account.state_updated_at
     ? `Data akun diperbarui ${new Date(account.state_updated_at).toLocaleString("id-ID", {timeZone:"Asia/Jakarta"})} WIB`
     : "Belum menerima laporan saldo dari worker.";
-  card.append(title, detail, state, connection, form, controls, balance, balanceTime);
+  card.append(title, detail, state, loginState, connection, form, controls, balance, balanceTime);
 }
 
 function addAccountCard(account) {

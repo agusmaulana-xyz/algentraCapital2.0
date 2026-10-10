@@ -25,6 +25,7 @@ from ..mt5_performance import get_mt5_performance
 from ..schemas import (
     FollowerAccountReport,
     ManagedCopyActive,
+    ManagedCopyLoginCheckResult,
     ManagedCopySetup,
     ManagedCopyWorkerStatus,
     MT5AccountActive,
@@ -194,6 +195,8 @@ def _managed_copy_payload(profile: ManagedCopyProfile | None) -> dict[str, objec
             status = "OFFLINE"
     return {
         "configured": True,
+        "login_status": profile.login_status,
+        "login_message": profile.login_message,
         "follower_symbol": profile.follower_symbol,
         "active": profile.active,
         "status": status,
@@ -235,6 +238,8 @@ def configure_managed_copy(
             setattr(profile, key, value)
         profile.status = "PAUSED"
         profile.status_message = None
+    profile.login_status = "CHECKING"
+    profile.login_message = "Memeriksa login dan kesiapan terminal MT5."
     profile.active = False
     profile.updated_at = utc_now()
     db.commit()
@@ -254,6 +259,8 @@ def set_managed_copy_active(
         raise HTTPException(status_code=409, detail="Akun ini tidak memakai layanan managed copy")
     if profile is None:
         raise HTTPException(status_code=409, detail="Simpan pengaturan dan kredensial broker terlebih dahulu")
+    if payload.active and profile.login_status != "VALID":
+        raise HTTPException(status_code=409, detail="Login broker belum lolos pemeriksaan. Simpan kredensial untuk memeriksa login terlebih dahulu.")
     if payload.active and not _managed_worker_online(db):
         raise HTTPException(status_code=409, detail="Worker copier sedang offline. Coba lagi setelah layanan worker tersambung.")
     if payload.active and not payload.acknowledge_live_risk:
@@ -316,11 +323,54 @@ def list_managed_copy_jobs(
             "max_lot_total": profile.max_lot_total,
             "max_open_positions": profile.max_open_positions,
         })
+    login_checks = []
+    check_rows = db.execute(
+        select(ManagedCopyProfile, MT5Account)
+        .join(MT5Account, MT5Account.id == ManagedCopyProfile.account_id)
+        .where(
+            ManagedCopyProfile.login_status == "CHECKING",
+            MT5Account.execution_mode == "MANAGED",
+        )
+        .order_by(MT5Account.id.asc())
+    ).all()
+    for profile, account in check_rows:
+        try:
+            password = decrypt_managed_copy_password(profile.password_ciphertext)
+        except Exception:
+            profile.login_status = "ERROR"
+            profile.login_message = "Kredensial tidak dapat dibuka. Masukkan ulang password broker."
+            logger.exception("Gagal membuka kredensial untuk pemeriksaan login akun %s", account.id)
+            continue
+        login_checks.append({
+            "account_id": account.id,
+            "login": account.login,
+            "server": account.server,
+            "broker_password": password,
+        })
     managed_ids = list(db.execute(
         select(MT5Account.id).where(MT5Account.execution_mode == "MANAGED")
     ).scalars())
     db.commit()
-    return {"jobs": jobs, "managed_account_ids": managed_ids}
+    return {"jobs": jobs, "login_checks": login_checks, "managed_account_ids": managed_ids}
+
+
+@router.post("/copier/jobs/{account_id}/login-check")
+def report_managed_copy_login_check(
+    account_id: int,
+    payload: ManagedCopyLoginCheckResult,
+    x_copier_worker_key: str | None = Header(default=None, alias="X-Copier-Worker-Key"),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    _require_copier_worker(x_copier_worker_key)
+    profile = db.get(ManagedCopyProfile, account_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profil managed copy tidak ditemukan")
+    if profile.login_status != "CHECKING":
+        return {"status": profile.login_status}
+    profile.login_status = "VALID" if payload.valid else "ERROR"
+    profile.login_message = payload.message
+    db.commit()
+    return {"status": profile.login_status}
 
 
 @router.get("/copier/status")
@@ -363,6 +413,9 @@ def report_managed_copy_worker_status(
         raise HTTPException(status_code=404, detail="Job copy tidak ditemukan")
     profile.status = "PAUSED" if payload.status == "STOPPED" and not profile.active else payload.status
     profile.status_message = None if profile.status == "PAUSED" else payload.message
+    if payload.status == "RUNNING":
+        profile.login_status = "VALID"
+        profile.login_message = "Login broker berhasil dan terminal siap untuk copy trading."
     profile.last_seen_at = utc_now()
     db.commit()
     return {"status": "ok"}
