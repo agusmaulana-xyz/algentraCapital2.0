@@ -384,6 +384,29 @@
       if (remaining > 0) button._resendTimer = setInterval(update, 1000);
     }
 
+    function formatApiError(detail, fallback = "Permintaan gagal.") {
+      if (typeof detail === "string" && detail.trim()) return detail.trim();
+      if (Array.isArray(detail)) {
+        const messages = detail.map((item) => {
+          if (typeof item === "string") return item;
+          if (!item || typeof item !== "object") return "";
+          const message = item.msg || item.message || item.detail;
+          const location = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(" → ") : "";
+          return message ? `${location ? `${location}: ` : ""}${formatApiError(message, "")}` : "";
+        }).filter(Boolean);
+        return messages.length ? messages.join("; ") : fallback;
+      }
+      if (detail && typeof detail === "object") {
+        for (const key of ["detail", "message", "msg", "error"]) {
+          if (detail[key] !== undefined && detail[key] !== detail) {
+            const message = formatApiError(detail[key], "");
+            if (message) return message;
+          }
+        }
+      }
+      return fallback;
+    }
+
     async function parseApiResponse(response) {
       const raw = await response.text();
       if (!raw.trim()) return {};

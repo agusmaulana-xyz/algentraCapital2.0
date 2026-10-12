@@ -1,10 +1,18 @@
 import json
+import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
 
-from copytrade.managed_worker import ManagedWorker, _resolve, enable_terminal_auto_trading, load_config
+from copytrade.managed_worker import (
+    ManagedWorker,
+    _resolve,
+    acquire_worker_lock,
+    enable_terminal_auto_trading,
+    load_config,
+    release_worker_lock,
+)
 
 
 def test_load_config_resolves_local_paths_and_accepts_https_worker_api(tmp_path):
@@ -51,6 +59,17 @@ def test_resolve_keeps_absolute_paths_and_resolves_relative_paths(tmp_path):
     assert _resolve(tmp_path, str((tmp_path / "absolute").resolve())) == (tmp_path / "absolute").resolve()
 
 
+def test_worker_runtime_lock_blocks_duplicate_worker(tmp_path):
+    first = acquire_worker_lock(tmp_path)
+    try:
+        with pytest.raises(RuntimeError, match="worker lain"):
+            acquire_worker_lock(tmp_path)
+    finally:
+        release_worker_lock(first)
+    second = acquire_worker_lock(tmp_path)
+    release_worker_lock(second)
+
+
 def test_enable_terminal_auto_trading_updates_experts_section_idempotently(tmp_path):
     config = tmp_path / "Config" / "common.ini"
     config.parent.mkdir()
@@ -77,21 +96,23 @@ def test_enable_terminal_auto_trading_preserves_utf16_ini(tmp_path):
     assert "AllowLiveTrading=1" in config.read_text(encoding="utf-16")
 
 
-def test_validate_login_returns_safe_success_and_shuts_down(tmp_path, monkeypatch):
+def test_validate_login_returns_probe_success(tmp_path, monkeypatch):
     template = tmp_path / "template"
     template.mkdir()
     (template / "terminal64.exe").write_bytes(b"test-terminal")
     worker = ManagedWorker.__new__(ManagedWorker)
     worker.terminals_dir = tmp_path / "runtime" / "terminals"
     worker.template_dir = template
-    fake_mt5 = SimpleNamespace(
-        initialize=lambda **kwargs: kwargs["password"] == "private-password",
-        account_info=lambda: SimpleNamespace(login=12345, trade_allowed=True),
-        terminal_info=lambda: SimpleNamespace(connected=True, trade_allowed=True),
-        shutdown=lambda: None,
-        last_error=lambda: (0, "ok"),
+    worker.parent_environment = {}
+    worker.config = {"worker_api_key_env": "COPIER_WORKER_API_KEY"}
+    calls = []
+    monkeypatch.setattr(
+        "copytrade.managed_worker.subprocess.run",
+        lambda command, **kwargs: calls.append((command, kwargs)) or SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"valid": True, "message": "Login broker berhasil dan terminal siap untuk copy trading."}),
+        ),
     )
-    monkeypatch.setitem(sys.modules, "MetaTrader5", fake_mt5)
 
     valid, message = worker._validate_login({
         "account_id": 8,
@@ -102,5 +123,156 @@ def test_validate_login_returns_safe_success_and_shuts_down(tmp_path, monkeypatc
 
     assert valid is True
     assert message == "Login broker berhasil dan terminal siap untuk copy trading."
+    assert "private-password" in calls[0][1]["input"]
+    assert "private-password" not in " ".join(calls[0][0])
+    assert calls[0][1]["timeout"] == 45
     ini = (worker.terminals_dir / "8" / "Config" / "common.ini").read_text(encoding="utf-8")
     assert "AllowLiveTrading=1" in ini
+
+
+def test_validate_login_repairs_existing_partial_terminal_folder(tmp_path, monkeypatch):
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "terminal64.exe").write_bytes(b"test-terminal")
+    worker = ManagedWorker.__new__(ManagedWorker)
+    worker.terminals_dir = tmp_path / "runtime" / "terminals"
+    worker.template_dir = template
+    worker.parent_environment = {}
+    worker.config = {"worker_api_key_env": "COPIER_WORKER_API_KEY"}
+    partial = worker.terminals_dir / "8"
+    partial.mkdir(parents=True)
+    (partial / "stale.marker").write_text("partial", encoding="utf-8")
+    monkeypatch.setattr(
+        "copytrade.managed_worker.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"valid": True, "message": "ok"}),
+        ),
+    )
+
+    valid, _ = worker._validate_login({
+        "account_id": 8,
+        "login": "12345",
+        "server": "Broker-Demo",
+        "broker_password": "private-password",
+    })
+
+    assert valid is True
+    assert (partial / "terminal64.exe").read_bytes() == b"test-terminal"
+
+
+def test_validate_login_reports_mt5_connection_error_code_without_credentials(tmp_path, monkeypatch):
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "terminal64.exe").write_bytes(b"test-terminal")
+    worker = ManagedWorker.__new__(ManagedWorker)
+    worker.terminals_dir = tmp_path / "runtime" / "terminals"
+    worker.template_dir = template
+    worker.parent_environment = {}
+    worker.config = {"worker_api_key_env": "COPIER_WORKER_API_KEY"}
+    monkeypatch.setattr(
+        "copytrade.managed_worker.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"valid": False, "message": "Terminal MT5 gagal tersambung ke broker (kode -7: Terminal: connect failed). Periksa nama server broker dan koneksi jaringan VPS."}),
+        ),
+    )
+
+    valid, message = worker._validate_login({
+        "account_id": 9,
+        "login": "12345",
+        "server": "Broker-Demo",
+        "broker_password": "private-password",
+    })
+
+    assert valid is False
+    assert "kode -7: Terminal: connect failed" in message
+    assert "private-password" not in message
+
+
+def test_validate_login_explains_ipc_timeout_as_terminal_process_issue(tmp_path, monkeypatch):
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "terminal64.exe").write_bytes(b"test-terminal")
+    worker = ManagedWorker.__new__(ManagedWorker)
+    worker.terminals_dir = tmp_path / "runtime" / "terminals"
+    worker.template_dir = template
+    worker.parent_environment = {}
+    worker.config = {"worker_api_key_env": "COPIER_WORKER_API_KEY"}
+    monkeypatch.setattr(
+        "copytrade.managed_worker.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"valid": False, "message": "MT5 tidak merespons Python API (IPC timeout). Terminal mungkin macet atau dipakai proses lain. Pastikan satu worker memakai runtime ini, lalu restart terminal. Error ini tidak memastikan password/server salah."}),
+        ),
+    )
+
+    valid, message = worker._validate_login({
+        "account_id": 10,
+        "login": "12345",
+        "server": "Broker-Demo",
+        "broker_password": "private-password",
+    })
+
+    assert valid is False
+    assert "IPC timeout" in message
+    assert "satu worker" in message
+    assert "password/server salah" in message
+    assert len(message) <= 240
+
+
+def test_validate_login_bounds_a_hung_mt5_probe(tmp_path, monkeypatch):
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "terminal64.exe").write_bytes(b"test-terminal")
+    worker = ManagedWorker.__new__(ManagedWorker)
+    worker.terminals_dir = tmp_path / "runtime" / "terminals"
+    worker.template_dir = template
+    worker.parent_environment = {}
+    worker.config = {"worker_api_key_env": "COPIER_WORKER_API_KEY"}
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("login probe", timeout=45)
+
+    monkeypatch.setattr("copytrade.managed_worker.subprocess.run", timeout)
+    valid, message = worker._validate_login({
+        "account_id": 11,
+        "login": "12345",
+        "server": "Broker-Demo",
+        "broker_password": "private-password",
+    })
+
+    assert valid is False
+    assert "45 detik" in message
+    assert "worker utama tetap berjalan" in message
+
+
+def test_sync_stops_existing_follower_before_validating_its_terminal(tmp_path):
+    worker = ManagedWorker.__new__(ManagedWorker)
+    worker.children = {10: object()}
+    worker.terminals_dir = tmp_path / "terminals"
+    worker.terminals_dir.mkdir()
+    worker.retry_at = {}
+    worker.failure_counts = {}
+    events = []
+    worker._start_master = lambda _now: None
+    worker._request = lambda endpoint, payload=None: (
+        {"jobs": [], "managed_account_ids": [10], "login_checks": [{"account_id": 10}]}
+        if endpoint == "/api/mt5/copier/jobs"
+        else {}
+    )
+
+    def stop_job(account_id, *, report=True):
+        events.append(("stop", account_id))
+        worker.children.pop(account_id, None)
+
+    def validate(check):
+        events.append(("validate", check["account_id"]))
+        assert check["account_id"] not in worker.children
+        return True, "ok"
+
+    worker._stop_job = stop_job
+    worker._validate_login = validate
+    worker.sync_once(now=1)
+
+    assert events == [("stop", 10), ("validate", 10)]

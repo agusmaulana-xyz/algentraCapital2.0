@@ -70,10 +70,52 @@ def enable_terminal_auto_trading(terminal_dir: str | Path) -> Path:
         if output and output[-1].strip():
             output.append("")
         output.extend(("[Experts]", *keys.values()))
-    temporary = config_path.with_suffix(".ini.tmp")
-    temporary.write_bytes((newline.join(output) + newline).encode(encoding))
-    temporary.replace(config_path)
+    rendered = newline.join(output) + newline
+    if rendered == text:
+        return config_path
+    temporary = config_path.with_name(f"{config_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temporary.write_bytes(rendered.encode(encoding))
+        temporary.replace(config_path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return config_path
+
+
+def acquire_worker_lock(runtime_dir: str | Path):
+    """Hold a process-wide lock so only one managed worker uses this runtime."""
+    lock_path = Path(runtime_dir) / "managed-worker.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, ImportError) as exc:
+        handle.close()
+        raise RuntimeError("Managed worker lain sudah memakai runtime ini; hentikan worker duplikat terlebih dahulu.") from exc
+    return handle
+
+
+def release_worker_lock(handle) -> None:
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -240,9 +282,10 @@ class ManagedWorker:
         account_dir = self.terminals_dir / str(account_id)
         terminal = account_dir / "terminal64.exe"
         if not terminal.is_file():
-            if account_dir.exists():
-                raise RuntimeError("Folder terminal follower sudah ada tetapi terminal64.exe tidak ditemukan; periksa worker runtime")
-            shutil.copytree(self.template_dir, account_dir)
+            # A previous interrupted copy (or another worker startup) may have
+            # created the account folder already. Complete that clone instead
+            # of failing with FileExistsError on every retry.
+            shutil.copytree(self.template_dir, account_dir, dirs_exist_ok=True)
         if not terminal.is_file():
             raise RuntimeError("Salinan terminal follower tidak lengkap")
         enable_terminal_auto_trading(account_dir)
@@ -293,49 +336,56 @@ class ManagedWorker:
         account_id = int(job["account_id"])
         account_dir = self.terminals_dir / str(account_id)
         terminal = account_dir / "terminal64.exe"
-        if not terminal.is_file():
-            shutil.copytree(self.template_dir, account_dir)
-        if not terminal.is_file():
-            return False, "Terminal follower tidak tersedia pada server."
-        enable_terminal_auto_trading(account_dir)
-        password_env = f"ALGENTRA_MANAGED_{account_id}_PASSWORD"
         try:
-            import MetaTrader5 as mt5  # type: ignore[import-not-found]
-        except ImportError:
-            return False, "Package MetaTrader5 tidak tersedia pada worker Windows."
+            if not terminal.is_file():
+                # Login checks and job startup share the same persistent folder.
+                # Make cloning idempotent so an existing partial folder is repaired.
+                shutil.copytree(self.template_dir, account_dir, dirs_exist_ok=True)
+            if not terminal.is_file():
+                return False, "Terminal follower tidak tersedia pada server."
+            enable_terminal_auto_trading(account_dir)
+        except PermissionError as exc:
+            logger.warning("Folder terminal akun %s sedang terkunci (%s)", account_id, exc)
+            return False, "File terminal MT5 sedang dipakai proses lain. Tutup terminal MT5 untuk akun ini lalu coba simpan kredensial lagi."
+        probe_env = self._clean_environment()
+        source_dir = str(Path(__file__).resolve().parents[1])
+        probe_env["PYTHONPATH"] = source_dir + (
+            os.pathsep + probe_env["PYTHONPATH"] if probe_env.get("PYTHONPATH") else ""
+        )
+        probe_input = json.dumps({
+            "path": str(terminal),
+            "login": int(job["login"]),
+            "password": str(job["broker_password"]),
+            "server": str(job["server"]),
+        })
         try:
-            options = {
-                "path": str(terminal),
-                "login": int(job["login"]),
-                "password": str(job["broker_password"]),
-                "server": str(job["server"]),
-                "portable": True,
-                "timeout": 30000,
-            }
-            if not mt5.initialize(**options):
-                error = mt5.last_error()
-                if error and error[0] == -6:
-                    return False, "Login gagal. Periksa nomor akun, password trading, dan nama server broker."
-                return False, "Terminal MT5 gagal tersambung ke broker. Periksa koneksi server broker."
-            account = mt5.account_info()
-            terminal_info = mt5.terminal_info()
-            if account is None or terminal_info is None or not getattr(terminal_info, "connected", False):
-                return False, "Login belum terhubung ke server broker. Periksa akun dan nama server."
-            if str(getattr(account, "login", "")) != str(job["login"]):
-                return False, "Terminal terhubung ke nomor akun yang berbeda dari yang dimasukkan."
-            if not getattr(account, "trade_allowed", False):
-                return False, "Login berhasil, tetapi broker menolak izin trading akun ini."
-            if not getattr(terminal_info, "trade_allowed", False):
-                return False, "Login berhasil, tetapi izin Auto Trading terminal belum aktif."
-            return True, "Login broker berhasil dan terminal siap untuk copy trading."
-        except Exception as exc:
-            logger.warning("Validasi login MT5 akun %s gagal (%s)", account_id, type(exc).__name__)
+            completed = subprocess.run(
+                [sys.executable, "-m", "copytrade.login_probe"],
+                cwd=Path(__file__).resolve().parents[2],
+                env=probe_env,
+                input=probe_input,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Probe login MT5 akun %s melewati batas waktu 45 detik", account_id)
+            return False, "Pemeriksaan MT5 melewati batas 45 detik (IPC timeout). Terminal tidak merespons; worker utama tetap berjalan."
+        except OSError as exc:
+            logger.warning("Probe login MT5 akun %s gagal dimulai (%s)", account_id, type(exc).__name__)
+            return False, "Worker tidak dapat memulai pemeriksaan Python API MT5."
+        if completed.returncode != 0:
+            logger.warning("Probe login MT5 akun %s berhenti dengan kode %s", account_id, completed.returncode)
             return False, "Worker tidak dapat memvalidasi login pada terminal MT5."
-        finally:
-            try:
-                mt5.shutdown()
-            except Exception:
-                pass
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            logger.warning("Probe login MT5 akun %s menghasilkan respons tidak valid", account_id)
+            return False, "Worker tidak dapat memvalidasi login pada terminal MT5."
+        if not isinstance(result, dict) or not isinstance(result.get("valid"), bool) or not isinstance(result.get("message"), str):
+            return False, "Worker tidak dapat memvalidasi login pada terminal MT5."
+        return result["valid"], result["message"][:240]
 
     def _start_job(self, job: dict[str, Any], now: float) -> ManagedChild:
         account_id = int(job["account_id"])
@@ -417,6 +467,12 @@ class ManagedWorker:
             account_id = int(check.get("account_id", 0))
             if account_id <= 0:
                 continue
+            # A follower and the login-check code must never initialize the
+            # same portable terminal at the same time. The API marks the
+            # profile inactive before queuing a check, but this worker may
+            # still have its previous child alive until this poll completes.
+            # Stop and reap that child before calling MT5's Python IPC API.
+            self._stop_job(account_id, report=False)
             try:
                 valid, message = self._validate_login(check)
             except Exception as exc:
@@ -428,7 +484,7 @@ class ManagedWorker:
                     {"valid": valid, "message": message},
                 )
             except RuntimeError as exc:
-                logger.warning("Hasil pemeriksaan login akun %s tidak terkirim (%s)", account_id, type(exc).__name__)
+                logger.warning("Hasil pemeriksaan login akun %s tidak terkirim: %s", account_id, exc)
         desired: dict[int, dict[str, Any]] = {}
         used_accounts: set[tuple[str, str]] = set()
         for job in jobs:
@@ -528,7 +584,12 @@ def main() -> None:
     args = parser.parse_args()
     global logger
     logger = configure_logging("managed_worker")
-    ManagedWorker(load_config(args.config)).run()
+    worker = ManagedWorker(load_config(args.config))
+    lock = acquire_worker_lock(worker.runtime_dir)
+    try:
+        worker.run()
+    finally:
+        release_worker_lock(lock)
 
 
 if __name__ == "__main__":

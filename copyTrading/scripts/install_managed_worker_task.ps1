@@ -16,12 +16,12 @@ $taskName = "Algentra Managed Copy Worker"
 $launcherCommand = "Set-Location -LiteralPath '$resolvedRoot'; & '$resolvedPython' '$workerScript' '$workerConfig'"
 $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$launcherCommand`"" `
+    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$launcherCommand`"" `
     -WorkingDirectory $resolvedRoot
-$trigger = New-ScheduledTaskTrigger -AtStartup
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $principal = New-ScheduledTaskPrincipal `
     -UserId "$env:USERDOMAIN\$env:USERNAME" `
-    -LogonType S4U `
+    -LogonType Interactive `
     -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet `
     -RestartCount 5 `

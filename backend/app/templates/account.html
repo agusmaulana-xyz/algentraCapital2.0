@@ -48,7 +48,7 @@
       </fieldset>
       <label>Nama akun<input name="label" maxlength="80" placeholder="Copy Trading 1" required></label>
       <label>Server broker<input name="server" maxlength="128" placeholder="BrokerName-Live" required></label>
-      <label>Nomor akun broker<input name="login" maxlength="32" inputmode="numeric" required></label>
+      <label>Nomor akun broker<input name="login" maxlength="32" inputmode="numeric" pattern="[0-9]+" title="Nomor akun MT5 hanya boleh berisi angka" aria-describedby="account-login-help" required><span id="account-login-help" class="field-help">Masukkan nomor login MT5 berupa angka saja, tanpa spasi.</span></label>
       <div><button type="submit">Lanjutkan ke pembayaran</button></div>
     </form>
     <p id="account-message" class="status" role="status"></p>
@@ -125,6 +125,11 @@ const clientPlans = {{ client_plans | tojson }};
 let managedFormDirty = false;
 let managedWorkerReady = {{ 'true' if managed_copy_enabled else 'false' }};
 
+const accountLoginInput = document.querySelector('#account-form [name="login"]');
+accountLoginInput.addEventListener("input", () => {
+  accountLoginInput.setCustomValidity(accountLoginInput.validity.patternMismatch ? "Nomor akun MT5 hanya boleh berisi angka, tanpa spasi." : "");
+});
+
 const formatMoney = (value, currency) => `${Number(value || 0).toLocaleString("id-ID", {minimumFractionDigits:2, maximumFractionDigits:2})} ${currency || ""}`.trim();
 const modeLabel = (mode) => ({real:"Live", demo:"Demo", contest:"Kompetisi"}[mode] || mode || "MT5");
 
@@ -134,7 +139,7 @@ async function api(path, options = {}) {
   if (options.body && !(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {...options, headers});
   const result = await parseApiResponse(response);
-  if (!response.ok) throw new Error(result.detail || "Permintaan gagal.");
+  if (!response.ok) throw new Error(formatApiError(result.detail, `Permintaan gagal (HTTP ${response.status}).`));
   return result;
 }
 
