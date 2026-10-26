@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from .client_plans import CLIENT_PLANS
 from .config import PROJECT_ROOT, Settings, get_settings
 from .database import SessionLocal
-from .models import MT5Account, PaymentOrder, utc_now
+from .models import ManagedCopyProfile, MT5Account, PaymentOrder, PendingMT5Verification, utc_now
 from .token_crypto import encrypt_account_token
 
 
@@ -61,6 +61,11 @@ def review_payment_order(order_id: int, decision: str) -> tuple[str, int | None]
         if decision == "invalid":
             order.status = "REJECTED"
             order.updated_at = utc_now()
+            if order.prepayment_check_id:
+                check = db.get(PendingMT5Verification, order.prepayment_check_id)
+                if check is not None:
+                    db.delete(check)
+                order.prepayment_check_id = None
             db.commit()
             return order.status, None
 
@@ -93,6 +98,33 @@ def review_payment_order(order_id: int, decision: str) -> tuple[str, int | None]
         )
         db.add(account)
         db.flush()
+        if order.execution_mode == "MANAGED" and order.prepayment_check_id:
+            check = db.get(PendingMT5Verification, order.prepayment_check_id)
+            if (
+                check is None
+                or check.status != "ORDERED"
+                or check.owner_id != order.owner_id
+                or check.label != order.label
+                or check.server.casefold() != order.server.casefold()
+                or check.login != order.login
+                or check.plan != order.plan
+                or check.execution_mode != order.execution_mode
+                or not check.password_ciphertext
+            ):
+                db.rollback()
+                return "LOGIN_CHECK_EXPIRED", None
+            db.add(ManagedCopyProfile(
+                account_id=account.id,
+                password_ciphertext=check.password_ciphertext,
+                prepayment_check_id=check.id,
+                login_status="VALID",
+                login_message="Login MT5 berhasil. Sesi terminal dipertahankan untuk akun ini.",
+                active=False,
+                status="STANDBY",
+                status_message="Copy trading off. Terminal tersambung dan menunggu tombol Mulai.",
+            ))
+            check.status = "PROVISIONED"
+            check.message = "Akun disetujui. Sesi MT5 tetap tersambung dalam mode standby."
         order.account_id = account.id
         order.status = "APPROVED"
         order.updated_at = utc_now()

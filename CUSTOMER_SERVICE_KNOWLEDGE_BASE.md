@@ -24,7 +24,7 @@ Chat memakai Gemini dengan kredensial **`GEMINI_CS_API_KEY` yang berbeda dari ke
 
 ## Halaman dan alamat
 
-Alamat portal yang dicantumkan pada proyek saat ini: [https://algentracapital.my.id](https://algentracapital.my.id). EA follower juga memakai alamat ini secara default. Jika pelanggan membuka portal melalui domain resmi lain yang diberikan operator, gunakan domain yang sedang berlaku.
+Dalam setup lokal, portal dibuka di [http://127.0.0.1:8000](http://127.0.0.1:8000) dan EA memakai alamat yang sama. EA hanya dapat menjangkau alamat localhost jika MT5 berjalan di komputer yang sama dengan backend. Jika operator menyediakan alamat jaringan atau domain lain, gunakan alamat yang diberikan operator.
 
 - **Beranda:** `/` — ringkasan layanan, cara kerja, kanal kontak, jumlah pengguna terverifikasi.
 - **Performa:** `/#performance` — equity, saldo, floating profit, grafik equity, status akun utama, dan watchlist harga jika data tersedia.
@@ -79,7 +79,7 @@ Situs juga menampilkan jumlah akun klien yang telah menyelesaikan verifikasi ema
 ### A. Membuat akun portal
 
 1. Buka `/register` dari situs resmi.
-2. Masukkan email yang dapat diakses dan buat kata sandi minimal **12 karakter** (maksimal 72 byte).
+2. Masukkan email yang dapat diakses dan buat kata sandi minimal **8 karakter**.
 3. Masukkan kode verifikasi enam digit yang dikirim ke email. Kode berlaku **10 menit**.
 4. Jika email belum menerima kode, periksa folder spam/promosi dan pastikan alamat email benar. Pengiriman ulang dibatasi jeda satu menit dan hingga tiga pengiriman dalam satu jam; setelah batas tercapai, tunggu satu jam. Maksimal tiga percobaan memasukkan kode sebelum terkunci satu jam.
 5. Setelah verifikasi, masuk melalui `/login`. Pilihan “Biarkan saya tetap masuk selama 30 hari” bersifat opsional.
@@ -101,7 +101,7 @@ Jangan memasukkan atau mengirim kata sandi broker kepada customer service.
 
 1. Unduh source **MT5FollowerCopyEA.mq5** dari portal klien.
 2. Di MT5 pilih **File → Open Data Folder**, buka `MQL5/Experts`, lalu salin source `.mq5` ke folder tersebut. Buka file itu dengan MetaEditor dan tekan **F7** untuk compile.
-3. Pilih **Tools → Options → Expert Advisors**. Aktifkan **Allow WebRequest for listed URL**, lalu tambahkan alamat portal yang dipakai pelanggan (alamat default proyek: `https://algentracapital.my.id`).
+3. Pilih **Tools → Options → Expert Advisors**. Aktifkan **Allow WebRequest for listed URL**, lalu tambahkan alamat portal yang dipakai pelanggan (default lokal: `http://127.0.0.1:8000`).
 4. Dari **Navigator → Expert Advisors**, pasang EA Copy Trading pada chart.
 5. Isi `AccountToken` dengan token akun terkait. Pastikan `ServerURL` sama dengan alamat yang diizinkan di WebRequest.
 6. Tidak ada mode demo atau dry run: EA mengeksekusi dan menyalin order live saat sinyal valid dan izin trading MT5 aktif. Periksa simbol, ukuran lot, SL/TP, dan pengaturan risiko sebelum mengaktifkan Algo Trading.
@@ -119,7 +119,7 @@ Jika broker memakai nama simbol berbeda, misalnya menambahkan akhiran pada nama 
 
 1. Buka `/forgot-password` dan masukkan email akun.
 2. Masukkan kode enam digit yang dikirim ke email; kode berlaku 10 menit.
-3. Buat kata sandi baru minimal 12 karakter (maksimal 72 byte), lalu masuk kembali.
+3. Buat kata sandi baru minimal 8 karakter, lalu masuk kembali.
 
 ## Arti status dan bantuan awal
 

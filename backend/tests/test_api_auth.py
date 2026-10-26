@@ -11,7 +11,7 @@ from app.database import Base, SessionLocal
 from app.models import AdminUser, AuthSession, ClientUser, EAExecution, MT5Account, MT5AccountState, PasswordResetCode, Signal, Trade, utc_now
 from app.routers.dashboard import _csv_text
 from app.routers import auth as auth_router
-from app.main import app
+from app.main import PROJECT_ROOT, app
 
 
 def test_qris_endpoint_serves_current_payment_image():
@@ -146,7 +146,14 @@ def test_settings_endpoint_reads_and_updates_values_after_login():
         )
         assert login.status_code == 200
         stale_binary = client.get("/downloads/TelegramSignalEA.ex5")
-        assert stale_binary.status_code == 410
+        source_path = PROJECT_ROOT / "mt5" / "TelegramSignalEA.mq5"
+        binary_path = PROJECT_ROOT / "mt5" / "TelegramSignalEA.ex5"
+        binary_status = (
+            410
+            if not binary_path.is_file() or source_path.stat().st_mtime > binary_path.stat().st_mtime
+            else 200
+        )
+        assert stale_binary.status_code == binary_status
         current_source = client.get("/downloads/TelegramSignalEA.mq5")
         assert current_source.status_code == 200
         assert "DemoMode" not in current_source.text

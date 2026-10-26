@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.101"
+#property version   "1.105"
 #property description "Executes Telegram signals, reports master MT5 balance, and publishes all open positions"
 
 #define MAX_SIGNAL_TARGETS 20
@@ -14,7 +14,7 @@ enum ENUM_LOT_MODE
    LOT_RISK_PERCENT = 1
   };
 
-input string ServerURL = "https://algentracapital.my.id";
+input string ServerURL = "http://127.0.0.1:8000";
 input string ApiKey = "";
 input int PollIntervalMs = 1000;
 input long MagicNumber = 26093001;
@@ -39,6 +39,8 @@ datetime g_last_heartbeat = 0;
 datetime g_last_expiry_scan = 0;
 string g_connection_status = "starting";
 string g_last_signal = "none";
+string g_last_signal_status = "idle";
+string g_spread_failure_reason = "";
 int g_signal_count = 0;
 int g_wins = 0;
 int g_losses = 0;
@@ -113,6 +115,23 @@ bool TrySelectBrokerSymbol(const string candidate, string &resolved)
    return true;
   }
 
+bool AccountUsesCentSymbols()
+  {
+   string currency = AccountInfoString(ACCOUNT_CURRENCY);
+   StringToUpper(currency);
+   if(StringFind(currency, "CENT") >= 0)
+      return true;
+   string cent_currencies[] = {"USC", "USDC", "EUC", "GBC", "GBPC", "AUC", "AUDC", "CADC", "JPYC"};
+   for(int i = 0; i < ArraySize(cent_currencies); i++)
+      if(currency == cent_currencies[i])
+         return true;
+
+   string identity = AccountInfoString(ACCOUNT_SERVER) + " " + AccountInfoString(ACCOUNT_NAME) + " " +
+                     TerminalInfoString(TERMINAL_COMPANY);
+   StringToUpper(identity);
+   return StringFind(identity, "CENT") >= 0;
+  }
+
 bool ResolveBrokerSymbol(const string requested, const string suffix, const string mapping_csv,
                          string &resolved, string &reason)
   {
@@ -164,6 +183,13 @@ bool ResolveBrokerSymbol(const string requested, const string suffix, const stri
      }
    if(suffix != "" && TrySelectBrokerSymbol(source + suffix, resolved))
       return true;
+
+   string source_upper = source;
+   StringToUpper(source_upper);
+   // Telegram signals usually identify gold as XAUUSD. On a cent account,
+   // prefer XAUUSDc even if other XAUUSD variants are also listed.
+   if(source_upper == "XAUUSD" && AccountUsesCentSymbols() && TrySelectBrokerSymbol("XAUUSDc", resolved))
+      return true;
    if(TrySelectBrokerSymbol(source, resolved))
       return true;
 
@@ -200,6 +226,9 @@ bool ResolveBrokerSymbol(const string requested, const string suffix, const stri
      }
    if(matches > 1)
      {
+      if(AccountUsesCentSymbols() && StringFind(source_upper, "XAUUSD") == 0 &&
+         TrySelectBrokerSymbol("XAUUSDc", resolved))
+         return true;
       reason = StringFormat("symbol %s matches multiple broker instruments (%s); configure SymbolSuffix or SymbolMapCsv", source, match_list);
       return false;
      }
@@ -590,6 +619,37 @@ bool IsXauUsdSymbol(const string symbol)
    return StringFind(normalized, "XAUUSD") == 0;
   }
 
+double GoldPointMultiplier(const string symbol)
+  {
+   if(!IsXauUsdSymbol(symbol))
+      return 1.0;
+   string normalized = symbol;
+   StringToUpper(normalized);
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      return 1.0;
+   // Keep gold point-based inputs comparable when a cent account quotes
+   // XAUUSDc with one extra decimal place.
+   if(AccountUsesCentSymbols() || normalized == "XAUUSDC")
+      return MathMax(1.0, 0.01 / point);
+   return 1.0;
+  }
+
+int EffectiveGoldPointLimit(const string symbol, const int configured_points)
+  {
+   if(configured_points <= 0)
+      return configured_points;
+   return (int)MathCeil((double)configured_points * GoldPointMultiplier(symbol));
+  }
+
+void SetLastSignalStatus(const string status, const long signal_id, const string detail="")
+  {
+   string message = status;
+   if(detail != "")
+      message += ": " + StringSubstr(detail, 0, 180);
+   g_last_signal_status = StringFormat("#%I64d %s", signal_id, message);
+  }
+
 double NormalizePrice(const string symbol, const double price)
   {
    if(price <= 0.0)
@@ -645,42 +705,143 @@ double NormalizeLots(const string symbol, double lots)
    return NormalizeDouble(normalized, VolumePrecision(step));
   }
 
-double CalculateLots(const string symbol, const string action, const double price,
-                     const double stop_loss, const double risk_money)
+double MinimumBrokerLots(const string symbol)
   {
-   if(LotMode == LOT_FIXED)
-      return NormalizeLots(symbol, FixedLot);
-   if(stop_loss <= 0.0 || price <= 0.0 || risk_money <= 0.0)
+   double minimum = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   if(minimum <= 0.0)
       return 0.0;
+   return NormalizeLots(symbol, minimum);
+  }
+
+double CalculateLots(const string symbol, const string action, const double price,
+                     const double stop_loss, const double risk_money, string &reason)
+  {
+   reason = "";
+   double min_lot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   string currency = AccountInfoString(ACCOUNT_CURRENCY);
+   if(min_lot <= 0.0 || max_lot < min_lot || step <= 0.0)
+     {
+      reason = StringFormat("Spesifikasi volume broker tidak valid (min %.4f, max %.4f, step %.4f)",
+                            min_lot, max_lot, step);
+      return 0.0;
+     }
+   if(LotMode == LOT_FIXED)
+     {
+      double fixed_lots = NormalizeLots(symbol, FixedLot);
+      if(fixed_lots <= 0.0)
+        {
+         fixed_lots = MinimumBrokerLots(symbol);
+         reason = StringFormat("FixedLot di bawah minimum; menggunakan lot minimum broker %.4f", fixed_lots);
+        }
+      return fixed_lots;
+     }
+   if(stop_loss <= 0.0)
+     {
+      reason = "SL tidak tersedia; RiskPercent memerlukan SL untuk menghitung lot";
+      return 0.0;
+     }
+   if(price <= 0.0)
+     {
+      reason = "Harga entry tidak tersedia untuk menghitung lot";
+      return 0.0;
+     }
+   if(risk_money <= 0.0)
+     {
+      double minimum_lots = MinimumBrokerLots(symbol);
+      if(minimum_lots > 0.0)
+        {
+         reason = StringFormat("Anggaran risiko %.2f %s; menggunakan lot minimum broker %.4f",
+                               risk_money, currency, minimum_lots);
+         Print("[TelegramSignalEA] risk budget is zero; trying minimum broker lot symbol=", symbol,
+               " lot=", DoubleToString(minimum_lots, 4),
+               " equity=", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
+         return minimum_lots;
+        }
+      reason = "Lot minimum broker tidak valid";
+      return 0.0;
+     }
    ENUM_ORDER_TYPE order_type = action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
    double profit_at_stop = 0.0;
+   ResetLastError();
    if(!OrderCalcProfit(order_type, symbol, 1.0, price, stop_loss, profit_at_stop))
+     {
+      int error = GetLastError();
+      reason = StringFormat("OrderCalcProfit gagal untuk %s (entry %s, SL %s, error %d)",
+                            symbol,
+                            DoubleToString(price, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                            DoubleToString(stop_loss, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                            error);
       return 0.0;
+     }
    double risk_per_lot = MathAbs(profit_at_stop);
-   if(risk_money <= 0.0 || risk_per_lot <= 0.0)
+   if(risk_per_lot <= 0.0)
+     {
+      reason = StringFormat("Estimasi risiko per lot tidak valid untuk %s (entry %s, SL %s)",
+                            symbol,
+                            DoubleToString(price, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
+                            DoubleToString(stop_loss, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)));
       return 0.0;
-   return NormalizeLots(symbol, risk_money / risk_per_lot);
+     }
+   double requested_lots = risk_money / risk_per_lot;
+   if(requested_lots + step * 0.000001 < min_lot)
+     {
+      double minimum_lot_risk = risk_per_lot * min_lot;
+      double minimum_lots = MinimumBrokerLots(symbol);
+      if(minimum_lots > 0.0)
+        {
+         reason = StringFormat("Lot hasil risiko di bawah minimum broker; menggunakan %.4f (estimasi risiko %.2f %s)",
+                               minimum_lots, minimum_lot_risk, currency);
+         Print("[TelegramSignalEA] calculated lot is below broker minimum; trying minimum lot symbol=", symbol,
+               " lot=", DoubleToString(minimum_lots, 4),
+               " calculated_lot=", DoubleToString(requested_lots, 6));
+         return minimum_lots;
+        }
+      reason = StringFormat("Lot minimum broker tidak valid (min %.4f, max %.4f, step %.4f)", min_lot, max_lot, step);
+      Print("[TelegramSignalEA] lot sizing blocked symbol=", symbol,
+            " account_currency=", currency,
+            " equity=", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
+            " RiskPercent=", DoubleToString(RiskPercent, 2),
+            " risk_per_entry=", DoubleToString(risk_money, 2),
+            " min_lot=", DoubleToString(min_lot, 4),
+            " min_lot_risk=", DoubleToString(minimum_lot_risk, 2),
+            " calculated_lot=", DoubleToString(requested_lots, 6));
+      return 0.0;
+     }
+   double normalized_lots = NormalizeLots(symbol, requested_lots);
+   if(normalized_lots <= 0.0)
+      reason = StringFormat("Hasil lot %.6f tidak sesuai minimum %.4f, maksimum %.4f, atau step %.4f broker",
+                            requested_lots, min_lot, max_lot, step);
+   return normalized_lots;
   }
 
 bool CheckSpread(const string symbol)
   {
+   g_spread_failure_reason = "";
    double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    if(ask <= 0.0 || bid <= 0.0 || point <= 0.0)
+     {
+      g_spread_failure_reason = "quote XAUUSD tidak tersedia";
       return false;
+     }
    if(MaxSpreadPoints <= 0)
       return true;
    double spread = (ask - bid) / point;
-   return spread <= MaxSpreadPoints;
-  }
-
-bool CheckMargin(const ENUM_ORDER_TYPE order_type, const string symbol, const double lots, const double price)
-  {
-   double margin = 0.0;
-   if(!OrderCalcMargin(order_type, symbol, lots, price, margin))
+   int spread_limit = EffectiveGoldPointLimit(symbol, MaxSpreadPoints);
+   if(spread > spread_limit)
+     {
+      g_spread_failure_reason = StringFormat("spread %.1f points melebihi batas %d points pada %s",
+                                             spread, spread_limit, symbol);
+      Print("[TelegramSignalEA] spread gate symbol=", symbol,
+            " spread_points=", DoubleToString(spread, 1),
+            " limit_points=", spread_limit,
+            " point=", DoubleToString(point, 8));
       return false;
-   return margin <= AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+     }
+   return true;
   }
 
 bool CheckPriceLevels(const string symbol, const string action, const double reference, const double sl, const double tp)
@@ -709,7 +870,8 @@ bool PlaceOrder(const string action, const string order_type, const string symbo
   {
    string comment = SignalMarker(signal_id, leg);
    g_trade.SetExpertMagicNumber((ulong)MagicNumber);
-   g_trade.SetDeviationInPoints((ulong)MaxSlippage);
+   int slippage_limit = EffectiveGoldPointLimit(symbol, MaxSlippage);
+   g_trade.SetDeviationInPoints((ulong)MathMax(0, slippage_limit));
    g_trade.SetTypeFillingBySymbol(symbol);
    bool placed = false;
    int expiration_modes = (int)SymbolInfoInteger(symbol, SYMBOL_EXPIRATION_MODE);
@@ -735,6 +897,12 @@ bool PlaceOrder(const string action, const string order_type, const string symbo
       uint retcode = g_trade.ResultRetcode();
       if(placed && (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_PLACED || retcode == TRADE_RETCODE_DONE_PARTIAL))
          return true;
+      Print("[TelegramSignalEA] order attempt=", attempt + 1,
+            " symbol=", symbol,
+            " retcode=", retcode,
+            " comment=", g_trade.ResultRetcodeDescription());
+      if(retcode == TRADE_RETCODE_NO_MONEY)
+         break;
       if(attempt + 1 < MathMax(1, MaxRetries))
          Sleep(250 * (attempt + 1));
      }
@@ -808,6 +976,7 @@ void ReportExpiredOrdersFromHistory()
 
 void RejectSignal(const long signal_id, const string symbol, const string action, const string reason, const int leg_count=1)
   {
+   SetLastSignalStatus("REJECTED", signal_id, reason);
    int count = MathMax(1, leg_count);
    for(int i = 0; i < count; i++)
      {
@@ -821,6 +990,7 @@ void RejectSignal(const long signal_id, const string symbol, const string action
 void DeferSignal(const long signal_id, const string symbol, const string reason)
   {
    g_last_signal = StringFormat("waiting %s #%I64d", symbol, signal_id);
+   SetLastSignalStatus("WAITING; akan dicoba ulang", signal_id, reason);
    Print("[TelegramSignalEA] signal ", signal_id, " deferred: ", reason,
          "; it will be retried after the backend claim lease expires");
   }
@@ -828,6 +998,7 @@ void DeferSignal(const long signal_id, const string symbol, const string reason)
 void ReportLegOutcome(const long signal_id, const string symbol, const string action, const int leg,
                       const string status, const double lots, const string reason)
   {
+   SetLastSignalStatus(status, signal_id, reason);
    int state = status == "FAILED" ? 3 : 2;
    SaveReport(signal_id, state, 0, 0.0, lots, leg);
    SendReport(signal_id, status, 0, symbol, action, lots, 0.0, reason, leg);
@@ -903,9 +1074,9 @@ bool ValidateSignalPlan(const string symbol, const string action, const string r
 
       double sl = sl_input;
       if(UseDefaultSLTP && sl <= 0.0 && DefaultSLPoints > 0 && point > 0.0)
-         sl = action == "BUY" ? reference - DefaultSLPoints * point : reference + DefaultSLPoints * point;
+         sl = action == "BUY" ? reference - EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point : reference + EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point;
       if(UseDefaultSLTP && tp <= 0.0 && DefaultTPPoints > 0 && point > 0.0)
-         tp = action == "BUY" ? reference + DefaultTPPoints * point : reference - DefaultTPPoints * point;
+         tp = action == "BUY" ? reference + EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point : reference - EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point;
       sl = NormalizePrice(symbol, sl);
       tp = NormalizePrice(symbol, tp);
       if(!CheckPriceLevels(symbol, action, reference, sl, tp))
@@ -1063,9 +1234,9 @@ bool ProcessOrderLeg(const long signal_id, const string symbol, const string act
    if(UseDefaultSLTP && point > 0.0)
      {
       if(sl <= 0.0 && DefaultSLPoints > 0)
-         sl = action == "BUY" ? reference - DefaultSLPoints * point : reference + DefaultSLPoints * point;
+         sl = action == "BUY" ? reference - EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point : reference + EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point;
       if(tp <= 0.0 && DefaultTPPoints > 0)
-         tp = action == "BUY" ? reference + DefaultTPPoints * point : reference - DefaultTPPoints * point;
+         tp = action == "BUY" ? reference + EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point : reference - EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point;
      }
    sl = NormalizePrice(symbol, sl);
    tp = NormalizePrice(symbol, tp);
@@ -1080,28 +1251,37 @@ bool ProcessOrderLeg(const long signal_id, const string symbol, const string act
       return false;
      }
 
-   double lots = CalculateLots(symbol, action, reference, sl, risk_money);
+   string lot_error = "";
+   double lots = CalculateLots(symbol, action, reference, sl, risk_money, lot_error);
    if(lots <= 0.0)
      {
-      ReportLegOutcome(signal_id, symbol, action, leg, "REJECTED", 0.0, "Lot size invalid or risk sizing requires SL");
+      ReportLegOutcome(signal_id, symbol, action, leg, "REJECTED", 0.0,
+                       lot_error != "" ? lot_error : "Perhitungan lot menghasilkan volume nol");
       return false;
      }
-   ENUM_ORDER_TYPE margin_type = action == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   if(!market && order_type == "LIMIT")
-      margin_type = action == "BUY" ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
-   if(!market && order_type == "STOP")
-      margin_type = action == "BUY" ? ORDER_TYPE_BUY_STOP : ORDER_TYPE_SELL_STOP;
-   if(!CheckMargin(margin_type, symbol, lots, reference))
-     {
-      ReportLegOutcome(signal_id, symbol, action, leg, "REJECTED", lots, "Insufficient free margin or margin calculation failed");
-      return false;
-     }
-
    if(!PlaceOrder(action, order_type, symbol, entry, sl, tp, lots, signal_id, leg))
      {
-      string failure = StringFormat("Order failed: %s (%u)", g_trade.ResultRetcodeDescription(), g_trade.ResultRetcode());
-      ReportLegOutcome(signal_id, symbol, action, leg, "FAILED", lots, failure);
-      return false;
+      uint initial_retcode = g_trade.ResultRetcode();
+      double minimum_lots = MinimumBrokerLots(symbol);
+      double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+      bool minimum_retry = initial_retcode == TRADE_RETCODE_NO_MONEY && minimum_lots > 0.0 &&
+                           step > 0.0 && lots > minimum_lots + step * 0.000001;
+      if(minimum_retry)
+        {
+         Print("[TelegramSignalEA] broker rejected lot for margin; retrying once at minimum lot symbol=", symbol,
+               " original_lot=", DoubleToString(lots, 4),
+               " retry_lot=", DoubleToString(minimum_lots, 4));
+         if(PlaceOrder(action, order_type, symbol, entry, sl, tp, minimum_lots, signal_id, leg))
+            lots = minimum_lots;
+         else
+            minimum_retry = false;
+        }
+      if(!minimum_retry)
+        {
+         string failure = StringFormat("Order failed: %s (%u)", g_trade.ResultRetcodeDescription(), g_trade.ResultRetcode());
+         ReportLegOutcome(signal_id, symbol, action, leg, "FAILED", lots, failure);
+         return false;
+        }
      }
 
    long ticket = (long)g_trade.ResultOrder();
@@ -1111,6 +1291,8 @@ bool ProcessOrderLeg(const long signal_id, const string symbol, const string act
      {
       if(!FindExistingSignalOrder(signal_id, ticket, fill_lots, fill_price, leg) || ticket <= 0)
         {
+         SetLastSignalStatus("ORDER_ACCEPTED; mengambil nomor order", signal_id,
+                             StringFormat("simbol %s, lot %s", symbol, DoubleToString(fill_lots, 2)));
          Print("[TelegramSignalEA] signal ", signal_id, " entry ", leg,
                " accepted but ticket is not available yet; will recover by order marker");
          return false;
@@ -1121,8 +1303,12 @@ bool ProcessOrderLeg(const long signal_id, const string symbol, const string act
    if(fill_lots <= 0.0)
       fill_lots = lots;
    SaveReport(signal_id, 1, ticket, fill_price, fill_lots, leg);
-   SendReport(signal_id, "EXECUTED", ticket, symbol, action, fill_lots, fill_price,
-              StringFormat("Order accepted at entry %s", DoubleToString(market ? fill_price : entry, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS))), leg);
+   SetLastSignalStatus("EXECUTED", signal_id,
+                       StringFormat("%s %s lot %s", action, symbol, DoubleToString(fill_lots, 2)));
+   string execution_reason = StringFormat("Order accepted at entry %s",
+                                          DoubleToString(market ? fill_price : entry,
+                                                         (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)));
+   SendReport(signal_id, "EXECUTED", ticket, symbol, action, fill_lots, fill_price, execution_reason, leg);
    Print("[TelegramSignalEA] signal ", signal_id, " entry ", leg, " executed ticket ", ticket,
          " at ", DoubleToString(fill_price, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)),
          " lots ", DoubleToString(fill_lots, 2));
@@ -1139,8 +1325,11 @@ void ProcessSignal(const string item)
    string requested_symbol = JsonValue(item, "symbol");
    if(requested_symbol == "")
       requested_symbol = "XAUUSD";
+   g_last_signal = StringFormat("%s %s #%I64d", action, requested_symbol, signal_id);
+   SetLastSignalStatus("CLAIMED; memeriksa simbol dan izin trading", signal_id);
    if(SavedState(signal_id, 0) != 0)
      {
+      SetLastSignalStatus("SUDAH DIPROSES; kirim ulang laporan", signal_id);
       RepeatSavedReport(signal_id, requested_symbol, action, 0);
       return;
      }
@@ -1160,6 +1349,12 @@ void ProcessSignal(const string item)
       return;
      }
    g_last_signal = StringFormat("%s %s #%I64d", action, symbol, signal_id);
+   SetLastSignalStatus("CLAIMED; menyiapkan order", signal_id,
+                       StringFormat("simbol broker %s, mata uang akun %s", symbol, AccountInfoString(ACCOUNT_CURRENCY)));
+   Print("[TelegramSignalEA] signal ", signal_id,
+         " resolved symbol ", requested_symbol, " -> ", symbol,
+         " account_currency=", AccountInfoString(ACCOUNT_CURRENCY),
+         " cent_account=", AccountUsesCentSymbols() ? "true" : "false");
 
    double entry_low = JsonNumber(item, "entry_low");
    double entry_high = JsonNumber(item, "entry_high");
@@ -1226,7 +1421,8 @@ void ProcessSignal(const string item)
      }
    if(!CheckSpread(symbol))
      {
-      DeferSignal(signal_id, symbol, StringFormat("quote unavailable or spread exceeds MaxSpreadPoints (%d)", MaxSpreadPoints));
+      string spread_reason = g_spread_failure_reason != "" ? g_spread_failure_reason : "spread belum memenuhi batas trading";
+      DeferSignal(signal_id, symbol, spread_reason);
       return;
      }
 
@@ -1287,7 +1483,7 @@ void SendHeartbeat()
   {
    string symbol = JsonEscape(_Symbol);
    string body = StringFormat(
-      "{\"active\":true,\"terminal\":\"%s\",\"version\":\"1.101\",\"symbol\":\"%s\"}",
+      "{\"active\":true,\"terminal\":\"%s\",\"version\":\"1.105\",\"symbol\":\"%s\"}",
       JsonEscape(TerminalInfoString(TERMINAL_NAME)), symbol);
    string response;
    HttpRequest("POST", "/api/ea/heartbeat", body, response);
@@ -1372,12 +1568,13 @@ void UpdatePanel()
   {
    int closed = g_wins + g_losses;
    double winrate = closed > 0 ? (double)g_wins / closed * 100.0 : 0.0;
-    Comment("TelegramSignalEA 1.101\n",
+    Comment("TelegramSignalEA 1.105\n",
            "Backend: ", g_connection_status, "\n",
            "Mode: LIVE\n",
            "Signals this session: ", g_signal_count, "\n",
            "Win / Loss: ", g_wins, " / ", g_losses, " (", DoubleToString(winrate, 1), "%)\n",
-           "Last signal: ", g_last_signal);
+           "Last signal: ", g_last_signal, "\n",
+           "Execution status: ", g_last_signal_status);
   }
 
 int OnInit()

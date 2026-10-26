@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from copytrade.master_publisher import SignalIdGenerator, diff_snapshot, snapshot_positions
+from copytrade.master_publisher import SignalIdGenerator, diff_snapshot, reconnect_master, snapshot_positions
 
 
 def position(identifier, *, volume=0.1, sl=0, tp=0, comment="", magic=1):
@@ -39,3 +39,23 @@ def test_signal_ids_are_unique_and_monotonically_increasing(monkeypatch):
     assert first == "1760000000001-0"
     assert second == "1760000000001-1"
     assert third == "1760000000001-2"
+
+
+def test_reconnect_master_reinitializes_only_the_configured_source_terminal():
+    class FakeMT5:
+        def __init__(self):
+            self.shutdown_calls = 0
+            self.initialize_calls = []
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+        def initialize(self, **options):
+            self.initialize_calls.append(options)
+            return True
+
+    mt5 = FakeMT5()
+
+    assert reconnect_master(mt5, r"C:\\Master\\terminal64.exe") is True
+    assert mt5.shutdown_calls == 1
+    assert mt5.initialize_calls == [{"path": r"C:\\Master\\terminal64.exe", "timeout": 10_000}]

@@ -59,15 +59,17 @@ def calculate_lot(
     if not math.isfinite(raw) or raw <= 0:
         return LotResult(None, "hasil lot tidak valid")
     try:
-        cap = float(config.get("max_lot_per_order", maximum))
+        cap = float(config.get("max_lot_per_order", 0) or 0)
     except (TypeError, ValueError):
         return LotResult(None, "max_lot_per_order tidak valid")
-    if not math.isfinite(cap) or cap <= 0:
-        return LotResult(None, "max_lot_per_order harus lebih besar dari 0")
+    if not math.isfinite(cap) or cap < 0:
+        return LotResult(None, "max_lot_per_order tidak boleh negatif")
 
     try:
         step_decimal = Decimal(str(step))
-        bounded = min(Decimal(str(raw)), Decimal(str(maximum)), Decimal(str(cap)))
+        broker_max = Decimal(str(maximum))
+        application_max = broker_max if cap == 0 else min(broker_max, Decimal(str(cap)))
+        bounded = min(Decimal(str(raw)), application_max)
         units = (bounded / step_decimal).to_integral_value(rounding=ROUND_FLOOR)
         volume_decimal = units * step_decimal
     except (InvalidOperation, ZeroDivisionError):

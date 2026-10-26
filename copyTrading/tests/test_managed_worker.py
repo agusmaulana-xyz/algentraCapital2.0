@@ -1,6 +1,5 @@
 import json
 import subprocess
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -125,7 +124,8 @@ def test_validate_login_returns_probe_success(tmp_path, monkeypatch):
     assert message == "Login broker berhasil dan terminal siap untuk copy trading."
     assert "private-password" in calls[0][1]["input"]
     assert "private-password" not in " ".join(calls[0][0])
-    assert calls[0][1]["timeout"] == 45
+    assert calls[0][1]["timeout"] == 165
+    assert json.loads(calls[0][1]["input"])["template_dir"] == str(template)
     ini = (worker.terminals_dir / "8" / "Config" / "common.ini").read_text(encoding="utf-8")
     assert "AllowLiveTrading=1" in ini
 
@@ -190,7 +190,7 @@ def test_validate_login_reports_mt5_connection_error_code_without_credentials(tm
     assert "private-password" not in message
 
 
-def test_validate_login_explains_ipc_timeout_as_terminal_process_issue(tmp_path, monkeypatch):
+def test_validate_login_returns_native_terminal_disconnect_without_credentials(tmp_path, monkeypatch):
     template = tmp_path / "template"
     template.mkdir()
     (template / "terminal64.exe").write_bytes(b"test-terminal")
@@ -203,7 +203,7 @@ def test_validate_login_explains_ipc_timeout_as_terminal_process_issue(tmp_path,
         "copytrade.managed_worker.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0,
-            stdout=json.dumps({"valid": False, "message": "MT5 tidak merespons Python API (IPC timeout). Terminal mungkin macet atau dipakai proses lain. Pastikan satu worker memakai runtime ini, lalu restart terminal. Error ini tidak memastikan password/server salah."}),
+            stdout=json.dumps({"valid": False, "message": "Terminal MT5 tidak tersambung ke server broker dalam 150 detik. Periksa nama server dan akses internet worker."}),
         ),
     )
 
@@ -215,9 +215,7 @@ def test_validate_login_explains_ipc_timeout_as_terminal_process_issue(tmp_path,
     })
 
     assert valid is False
-    assert "IPC timeout" in message
-    assert "satu worker" in message
-    assert "password/server salah" in message
+    assert "tidak tersambung ke server broker" in message
     assert len(message) <= 240
 
 
@@ -232,7 +230,7 @@ def test_validate_login_bounds_a_hung_mt5_probe(tmp_path, monkeypatch):
     worker.config = {"worker_api_key_env": "COPIER_WORKER_API_KEY"}
 
     def timeout(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired("login probe", timeout=45)
+        raise subprocess.TimeoutExpired("login probe", timeout=165)
 
     monkeypatch.setattr("copytrade.managed_worker.subprocess.run", timeout)
     valid, message = worker._validate_login({
@@ -243,7 +241,7 @@ def test_validate_login_bounds_a_hung_mt5_probe(tmp_path, monkeypatch):
     })
 
     assert valid is False
-    assert "45 detik" in message
+    assert "165 detik" in message
     assert "worker utama tetap berjalan" in message
 
 
@@ -254,6 +252,11 @@ def test_sync_stops_existing_follower_before_validating_its_terminal(tmp_path):
     worker.terminals_dir.mkdir()
     worker.retry_at = {}
     worker.failure_counts = {}
+    worker.login_check_retry_at = {}
+    worker.api_missing_until = {}
+    worker.api_missing_absent_accounts = set()
+    worker.prepayment_retry_at = {}
+    worker.orphan_session_since = {}
     events = []
     worker._start_master = lambda _now: None
     worker._request = lambda endpoint, payload=None: (
@@ -262,11 +265,11 @@ def test_sync_stops_existing_follower_before_validating_its_terminal(tmp_path):
         else {}
     )
 
-    def stop_job(account_id, *, report=True):
+    def stop_job(account_id, *, report=True, stop_terminal=True):
         events.append(("stop", account_id))
         worker.children.pop(account_id, None)
 
-    def validate(check):
+    def validate(check, *, keep_terminal=False):
         events.append(("validate", check["account_id"]))
         assert check["account_id"] not in worker.children
         return True, "ok"

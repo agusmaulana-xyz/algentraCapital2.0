@@ -95,24 +95,82 @@ def migrate_schema() -> None:
             with engine.begin() as connection:
                 for name, sql_type in missing.items():
                     connection.execute(text(f"ALTER TABLE mt5_accounts ADD COLUMN {name} {sql_type}"))
+    if "mt5_account_state" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("mt5_account_state")}
+        additions = {
+            "account_trade_allowed": "BOOLEAN",
+            "python_api_trade_allowed": "BOOLEAN",
+            "copy_error": "VARCHAR(240)",
+        }
+        missing = {name: sql_type for name, sql_type in additions.items() if name not in columns}
+        if missing:
+            with engine.begin() as connection:
+                for name, sql_type in missing.items():
+                    connection.execute(text(f"ALTER TABLE mt5_account_state ADD COLUMN {name} {sql_type}"))
     if "payment_orders" in inspector.get_table_names():
         columns = {column["name"] for column in inspector.get_columns("payment_orders")}
-        if "execution_mode" not in columns:
+        additions = {
+            "execution_mode": "VARCHAR(16) NOT NULL DEFAULT 'EA'",
+            "prepayment_check_id": "VARCHAR(64)",
+            "payment_provider": "VARCHAR(16) NOT NULL DEFAULT 'MANUAL'",
+            "airpay_external_id": "VARCHAR(100)",
+            "airpay_transaction_id": "VARCHAR(100)",
+            "airpay_image_tid": "VARCHAR(150)",
+            "airpay_merchant_uid": "VARCHAR(150)",
+            "airpay_status": "VARCHAR(24)",
+            "airpay_total_amount": "INTEGER",
+            "airpay_unique_code": "INTEGER",
+            "airpay_fee_amount": "INTEGER",
+            "airpay_net_amount": "INTEGER",
+            "airpay_mdr_rate": "VARCHAR(32)",
+            "airpay_expiry_at": "DATETIME",
+            "airpay_paid_at": "DATETIME",
+            "payment_message": "VARCHAR(240)",
+        }
+        missing = {name: sql_type for name, sql_type in additions.items() if name not in columns}
+        if missing:
             with engine.begin() as connection:
-                connection.execute(
-                    text("ALTER TABLE payment_orders ADD COLUMN execution_mode VARCHAR(16) NOT NULL DEFAULT 'EA'")
-                )
+                for name, sql_type in missing.items():
+                    connection.execute(text(f"ALTER TABLE payment_orders ADD COLUMN {name} {sql_type}"))
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_orders_prepayment_check_id "
+                "ON payment_orders(prepayment_check_id)"
+            ))
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_orders_airpay_external_id "
+                "ON payment_orders(airpay_external_id)"
+            ))
     if "managed_copy_profiles" in inspector.get_table_names():
         columns = {column["name"] for column in inspector.get_columns("managed_copy_profiles")}
         additions = {
             "login_status": "VARCHAR(24) NOT NULL DEFAULT 'UNCHECKED'",
             "login_message": "VARCHAR(240)",
+            "prepayment_check_id": "VARCHAR(64)",
         }
         missing = {name: sql_type for name, sql_type in additions.items() if name not in columns}
         if missing:
             with engine.begin() as connection:
                 for name, sql_type in missing.items():
                     connection.execute(text(f"ALTER TABLE managed_copy_profiles ADD COLUMN {name} {sql_type}"))
+    if "pending_mt5_verifications" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("pending_mt5_verifications")}
+        additions = {
+            "session_connected": "BOOLEAN NOT NULL DEFAULT 0",
+            "balance": "FLOAT",
+            "equity": "FLOAT",
+            "floating_profit": "FLOAT",
+            "currency": "VARCHAR(16)",
+            "account_trade_allowed": "BOOLEAN",
+            "terminal_trade_allowed": "BOOLEAN",
+            "expert_trade_allowed": "BOOLEAN",
+            "session_observed_at": "DATETIME",
+        }
+        missing = {name: sql_type for name, sql_type in additions.items() if name not in columns}
+        if missing:
+            with engine.begin() as connection:
+                for name, sql_type in missing.items():
+                    connection.execute(text(f"ALTER TABLE pending_mt5_verifications ADD COLUMN {name} {sql_type}"))
 
 
 def get_db() -> Generator[Session, None, None]:

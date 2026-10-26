@@ -195,13 +195,15 @@ class ManagedCopyProfile(Base):
         ForeignKey("mt5_accounts.id", ondelete="CASCADE"), primary_key=True
     )
     password_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    prepayment_check_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     follower_symbol: Mapped[str] = mapped_column(String(64), default="XAUUSD", nullable=False)
     mode_lot: Mapped[str] = mapped_column(String(16), default="rasio", nullable=False)
     ratio_lot: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     lot_tetap: Mapped[float] = mapped_column(Float, default=0.01, nullable=False)
-    max_lot_per_order: Mapped[float] = mapped_column(Float, default=0.05, nullable=False)
-    max_lot_total: Mapped[float] = mapped_column(Float, default=0.10, nullable=False)
-    max_open_positions: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    # Zero means no application-level limit for managed server copy trading.
+    max_lot_per_order: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_lot_total: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_open_positions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     login_status: Mapped[str] = mapped_column(String(24), default="UNCHECKED", nullable=False)
     login_message: Mapped[str | None] = mapped_column(String(240), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -227,13 +229,60 @@ class PaymentOrder(Base):
     login: Mapped[str] = mapped_column(String(32), nullable=False)
     plan: Mapped[str] = mapped_column(String(16), nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(16), default="EA", nullable=False)
+    prepayment_check_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     total_idr: Mapped[int] = mapped_column(Integer, nullable=False)
+    payment_provider: Mapped[str] = mapped_column(String(16), nullable=False, default="MANUAL")
+    airpay_external_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    airpay_transaction_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    airpay_image_tid: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    airpay_merchant_uid: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    airpay_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    airpay_total_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    airpay_unique_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    airpay_fee_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    airpay_net_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    airpay_mdr_rate: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    airpay_expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    airpay_paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payment_message: Mapped[str | None] = mapped_column(String(240), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="PENDING_PAYMENT", nullable=False)
     proof_filename: Mapped[str | None] = mapped_column(String(128), nullable=True)
     account_id: Mapped[int | None] = mapped_column(ForeignKey("mt5_accounts.id", ondelete="SET NULL"), nullable=True)
     admin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+class PendingMT5Verification(Base):
+    """Short-lived, encrypted broker credentials verified before checkout."""
+
+    __tablename__ = "pending_mt5_verifications"
+    __table_args__ = (
+        Index("ix_pending_mt5_verifications_owner_created", "owner_id", "created_at"),
+        Index("ix_pending_mt5_verifications_status_expiry", "status", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("client_users.id", ondelete="CASCADE"), nullable=False)
+    label: Mapped[str] = mapped_column(String(80), nullable=False)
+    server: Mapped[str] = mapped_column(String(128), nullable=False)
+    login: Mapped[str] = mapped_column(String(32), nullable=False)
+    plan: Mapped[str] = mapped_column(String(16), nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    password_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="CHECKING", nullable=False)
+    message: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    session_connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    floating_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    account_trade_allowed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    terminal_trade_allowed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    expert_trade_allowed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    session_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class CSConversation(Base):
@@ -278,8 +327,11 @@ class MT5AccountState(Base):
     currency: Mapped[str] = mapped_column(String(16), nullable=False)
     trade_mode: Mapped[str] = mapped_column(String(16), nullable=False)
     allow_live_trading: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    account_trade_allowed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    python_api_trade_allowed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     terminal_trade_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     expert_trade_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    copy_error: Mapped[str | None] = mapped_column(String(240), nullable=True)
     open_position_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     history_cursor: Mapped[str] = mapped_column(String(64), nullable=False, default="0")
     history_cursor_msc: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)

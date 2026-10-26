@@ -4,9 +4,11 @@ src/copytrade/__init__.py
 src/copytrade/follower.py
 src/copytrade/launcher.py
 src/copytrade/logging_setup.py
+src/copytrade/login_probe.py
 src/copytrade/lot_calc.py
 src/copytrade/managed_worker.py
 src/copytrade/master_publisher.py
+src/copytrade/mt5_runtime.py
 src/copytrade/protocol.py
 src/copytrade/signal_io.py
 src/copytrade/state.py
@@ -18,10 +20,12 @@ src/copytrade_mt5.egg-info/requires.txt
 src/copytrade_mt5.egg-info/top_level.txt
 tests/test_follower_logic.py
 tests/test_launcher.py
+tests/test_login_probe.py
 tests/test_lot_calc.py
 tests/test_managed_worker.py
 tests/test_master_diff.py
 tests/test_protocol.py
 tests/test_signal_io.py
 tests/test_state.py
+tests/test_symbol_map.py
 tests/test_three_followers.py

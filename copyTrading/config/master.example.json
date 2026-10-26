@@ -1,0 +1,5 @@
+{
+  "terminal_path": "C:/Program Files/MetaTrader 5/terminal64.exe",
+  "folder_sinyal": "runtime/signals",
+  "poll_interval_ms": 50
+}

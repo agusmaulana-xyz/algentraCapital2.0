@@ -12,7 +12,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..auth import hash_password, verify_password
+from ..auth import hash_client_password, hash_password, verify_password
 from ..config import get_settings
 from ..database import get_db
 from ..email_service import send_verification_code
@@ -150,8 +150,6 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> dict[st
     if not registration_is_open(db):
         raise HTTPException(status_code=403, detail="Pendaftaran client sedang ditutup. Silakan tunggu pengumuman launching.")
     email = _normalized_email(payload.email)
-    if len(payload.password.encode("utf-8")) > 72:
-        raise HTTPException(status_code=422, detail="Kata sandi maksimal 72 byte")
     settings = get_settings()
     if not settings.email_configured:
         raise HTTPException(status_code=503, detail="Pendaftaran belum tersedia karena email SMTP belum dikonfigurasi")
@@ -170,7 +168,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> dict[st
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     code_hash = _verification_hash(email, code)
-    password_hash = hash_password(payload.password)
+    password_hash = hash_client_password(payload.password)
     if pending is None:
         pending = EmailVerification(
             email=email,
@@ -207,8 +205,6 @@ def _utc(value):
 @router.post("/resend-code", status_code=status.HTTP_202_ACCEPTED)
 def resend_code(payload: ResendCodeRequest, db: Session = Depends(get_db)) -> dict[str, str | int]:
     email = _normalized_email(payload.email)
-    if len(payload.password.encode("utf-8")) > 72:
-        raise HTTPException(status_code=422, detail="Kata sandi maksimal 72 byte")
     settings = get_settings()
     if not settings.email_configured:
         raise HTTPException(status_code=503, detail="Pendaftaran belum tersedia karena email SMTP belum dikonfigurasi")
@@ -227,7 +223,7 @@ def resend_code(payload: ResendCodeRequest, db: Session = Depends(get_db)) -> di
     code = f"{secrets.randbelow(1_000_000):06d}"
     code_hash = _verification_hash(email, code)
     pending.code_hash = code_hash
-    pending.password_hash = hash_password(payload.password)
+    pending.password_hash = hash_client_password(payload.password)
     retry_after = _record_code_send(pending, now)
     db.commit()
 
@@ -338,9 +334,6 @@ def request_password_reset(payload: PasswordResetRequest, background_tasks: Back
 @router.post("/password-reset/confirm")
 def confirm_password_reset(payload: PasswordResetConfirmRequest, db: Session = Depends(get_db)) -> dict[str, str]:
     email = _normalized_email(payload.email)
-    if len(payload.password.encode("utf-8")) > 72:
-        raise HTTPException(status_code=422, detail="Kata sandi maksimal 72 byte")
-
     db.execute(text("BEGIN IMMEDIATE"))
     challenge = db.get(PasswordResetCode, _password_reset_email_key(email))
     now = utc_now()
@@ -379,7 +372,7 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest, db: Session = D
         db.commit()
         raise HTTPException(status_code=400, detail="Kode tidak valid atau kedaluwarsa")
 
-    user.password_hash = hash_password(payload.password)
+    user.password_hash = hash_client_password(payload.password)
     db.query(AuthSession).filter(
         AuthSession.user_type == "client",
         AuthSession.user_id == str(user.id),

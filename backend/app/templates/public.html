@@ -435,7 +435,7 @@
       if (status.registration_open !== registrationOpenAtRender) location.reload();
     } catch (_) {}
   };
-  setInterval(checkRegistrationStatus, 10000);
+  setInterval(() => { if (!document.hidden) void checkRegistrationStatus(); }, 10000);
   const pricesBox = $("#market-prices");
   const watchlist = ["XAUUSD", "EURUSD", "USDJPY", "GBPUSD"];
   const digits = { XAUUSD: 2, EURUSD: 5, USDJPY: 3, GBPUSD: 5 };
@@ -667,7 +667,7 @@
     }
     refreshFreshness();
   };
-  setInterval(refreshFreshness, 1000);
+  setInterval(() => { if (!document.hidden) refreshFreshness(); }, 1000);
 
   /* ---------- Equity & performa ---------- */
   const renderPerformance = (data) => {

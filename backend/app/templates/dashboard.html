@@ -194,6 +194,7 @@ const $ = (selector) => document.querySelector(selector);
       }
     }
     setInterval(async()=>{
+      if(document.hidden) return;
       try { const status=await api("/api/public/registration-status"); renderRegistrationState(status.registration_open); }
       catch(_) {}
     },10000);
@@ -224,7 +225,7 @@ const $ = (selector) => document.querySelector(selector);
     function startPolling() {
       if (pollingTimer) return;
       $("#connection").textContent="Realtime tidak tersedia; dashboard diperbarui berkala.";
-      pollingTimer=setInterval(()=>{if($("#auto-refresh").checked) refresh();},10000);
+      pollingTimer=setInterval(()=>{if(!document.hidden && $("#auto-refresh").checked) refresh();},10000);
     }
     function connectSocket() {
       const protocol=location.protocol==="https:"?"wss:":"ws:";

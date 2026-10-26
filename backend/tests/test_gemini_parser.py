@@ -135,5 +135,8 @@ def test_symbol_mapping_preserves_broker_suffix_and_rejects_low_confidence():
     assert mapped.symbol == "XAUUSDm"
     standard_symbol = validate_classification(SignalClassification.model_validate(signal("BUY", symbol="XAUUSD")))
     assert standard_symbol.symbol == "XAUUSD"
+    cent_symbol = validate_classification(SignalClassification.model_validate(signal("BUY", symbol="XAUUSDc")))
+    assert cent_symbol.status == "PENDING"
+    assert cent_symbol.symbol == "XAUUSDc"
     low_confidence = SignalClassification.model_validate(signal("BUY", confidence=0.4))
     assert validate_classification(low_confidence).status == "REJECTED"

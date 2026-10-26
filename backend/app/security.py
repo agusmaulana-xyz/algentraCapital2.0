@@ -1,5 +1,5 @@
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hmac
 import ipaddress
 import json
@@ -22,6 +22,7 @@ SESSION_DEFAULT_MAX_AGE = 12 * 60 * 60
 REMEMBER_CLIENT_MAX_AGE = 30 * 24 * 60 * 60
 AUTH_EXPIRES_SESSION_KEY = "auth_expires_at"
 REMEMBER_SESSION_KEY = "remember_client"
+SESSION_ACTIVITY_WRITE_INTERVAL = timedelta(minutes=1)
 
 
 def csrf_token(request: Request) -> str:
@@ -140,8 +141,12 @@ class DatabaseSessionMiddleware:
                 session = decoded
                 loaded_record = record
                 loaded_cookie = cookie_name
-                record.last_seen_at = now
-                db.commit()
+                last_seen_at = record.last_seen_at
+                if last_seen_at.tzinfo is None:
+                    last_seen_at = last_seen_at.replace(tzinfo=timezone.utc)
+                if now - last_seen_at >= SESSION_ACTIVITY_WRITE_INTERVAL:
+                    record.last_seen_at = now
+                    db.commit()
             break
 
         scope["session"] = session
@@ -215,6 +220,10 @@ class RateLimitMiddleware:
             return 10, 60
         if path in {"/api/ea/master/snapshot", "/api/mt5/follower/positions", "/api/mt5/follower/report"}:
             return 720, 60
+        if path == "/api/mt5/prepayment-checks":
+            return 4, 60
+        if path == "/api/mt5/servers":
+            return 60, 60
         if path.startswith("/api/tg/"):
             return 12, 60
         if path == "/api/parser/test":

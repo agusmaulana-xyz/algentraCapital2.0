@@ -11,7 +11,7 @@
   .transaction-badge { display:inline-flex; align-items:center; min-height:25px; padding:3px 9px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:10px; font-weight:800; }
   .transaction-badge--pending_payment, .transaction-badge--payment_submitted { color:#ead18f; }
   .transaction-badge--approved { color:#83e3a8; }
-  .transaction-badge--rejected { color:#e8a2a2; }
+  .transaction-badge--rejected, .transaction-badge--expired { color:#e8a2a2; }
   .transaction-details { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px 14px; margin:14px 0; }
   .transaction-details div { min-width:0; padding:9px 11px; border:1px solid var(--line); border-radius:10px; background:var(--glass-raised); }
   .transaction-details dt { color:var(--muted); font-size:10px; }
@@ -38,14 +38,14 @@
 <main id="main" tabindex="-1" class="page-shell">
   <div class="page-heading">
     <div><span class="eyebrow">PORTAL KLIEN / PEMBAYARAN</span><h1>Riwayat transaksi</h1>
-      <p class="page-description">Lihat status pesanan, lanjutkan pembayaran, dan buka nota beserta bukti transaksi dari halaman ini.</p>
+      <p class="page-description">Bayar pesanan melalui QRIS AirPay dan pantau konfirmasi otomatis dari halaman ini.</p>
     </div>
     <a class="workspace-tag" href="/account">Kembali ke akun MT5</a>
   </div>
   <section aria-labelledby="transactions-title">
     <h2 id="transactions-title">Pesanan dan pembayaran</h2>
     <div class="transaction-toolbar">
-      <p class="section-help">Nota hanya dapat dibuka oleh pemilik akun. Bukti pembayaran yang dikirim tersimpan privat.</p>
+      <p class="section-help">Nominal QRIS memakai kode unik. Bayar sesuai total yang ditampilkan agar pesanan terkonfirmasi otomatis.</p>
       <label for="transaction-filter">Tampilkan
         <select id="transaction-filter">
           <option value="ALL">Semua transaksi</option>
@@ -53,6 +53,7 @@
           <option value="PAYMENT_SUBMITTED">Sedang diproses</option>
           <option value="APPROVED">Transaksi diterima</option>
           <option value="REJECTED">Tidak valid</option>
+          <option value="EXPIRED">Kedaluwarsa</option>
           <option value="CANCELLED">Dibatalkan</option>
         </select>
       </label>
@@ -84,6 +85,9 @@ let orders = [];
 let expandedPaymentOrderId = requestedOrderId;
 let showProofFormForOrderId = null;
 let renderedFingerprint = "";
+const startingAirpayInvoices = new Set();
+const checkingAirpayOrders = new Set();
+let pollingAirpayOrders = false;
 
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
@@ -101,6 +105,7 @@ const statusNames = {
   PAYMENT_SUBMITTED: "Sedang diproses",
   APPROVED: "Transaksi diterima",
   REJECTED: "Transaksi tidak valid",
+  EXPIRED: "Tagihan kedaluwarsa",
   CANCELLED: "Dibatalkan"
 };
 const orderDate = (value) => value
@@ -119,7 +124,21 @@ function detailsFor(order) {
   const details = document.createElement("dl"); details.className = "transaction-details";
   addDetail(details, "Nomor transaksi", `#${order.id}`);
   addDetail(details, "Paket", `${plan.name} - ${plan.vcpu} - RAM ${plan.ram} - Disk ${plan.disk}`);
-  addDetail(details, "Total pembayaran", money(order.total_idr));
+  if (order.payment_provider === "AIRPAY") {
+    addDetail(details, "Nominal paket", money(order.total_idr));
+    if (order.airpay_total_amount != null) {
+      addDetail(details, "Kode unik", money(order.airpay_unique_code));
+      addDetail(details, "Total yang harus dibayar", money(order.airpay_total_amount));
+      if (order.airpay_fee_amount != null) addDetail(details, "Biaya AirPay", money(order.airpay_fee_amount));
+      if (order.airpay_net_amount != null) addDetail(details, "Diterima merchant", money(order.airpay_net_amount));
+    } else {
+      addDetail(details, "Total pembayaran", money(order.total_idr));
+    }
+    if (order.airpay_expiry_at) addDetail(details, "Batas pembayaran", orderDate(order.airpay_expiry_at));
+    if (order.airpay_status) addDetail(details, "Status QRIS", order.airpay_status);
+  } else {
+    addDetail(details, "Total pembayaran", money(order.total_idr));
+  }
   addDetail(details, "Nama akun", order.label);
   addDetail(details, "Mode layanan", order.execution_mode === "MANAGED" ? "Dikelola server (MT5 berjalan di worker)" : "Pasang EA di MT5 sendiri");
   addDetail(details, "Login broker", `${order.login} - ${order.server}`);
@@ -179,17 +198,19 @@ function renderOrders(force = false) {
     const actions = document.createElement("div"); actions.className = "toolbar";
     if (order.has_proof) addButton(actions, "Lihat nota pembayaran", () => showReceipt(order), true);
     if (order.status === "PENDING_PAYMENT") {
-      addButton(actions, expandedPaymentOrderId === order.id ? "Tutup pembayaran" : "Lanjutkan pembayaran", () => {
+      addButton(actions, expandedPaymentOrderId === order.id ? "Tutup pembayaran" : "Lihat pembayaran", () => {
         expandedPaymentOrderId = expandedPaymentOrderId === order.id ? null : order.id;
         renderOrders(true);
-      });
+      }, true);
     } else if (order.status === "PAYMENT_SUBMITTED") {
       const progress = document.createElement("p"); progress.className = "transaction-note";
-      progress.textContent = order.notification_sent
-        ? "Bukti sudah dikirim. Pembuatan akun sedang diproses dan menunggu pemeriksaan admin."
-        : "Bukti tersimpan, tetapi notifikasi ke admin belum terkirim.";
+      progress.textContent = order.payment_provider === "AIRPAY"
+        ? "Pembayaran AirPay terkonfirmasi. Pembuatan akun sedang diselesaikan."
+        : order.notification_sent
+          ? "Bukti sudah dikirim. Pembuatan akun sedang diproses dan menunggu pemeriksaan admin."
+          : "Bukti tersimpan, tetapi notifikasi ke admin belum terkirim.";
       card.append(progress);
-      if (!order.notification_sent) {
+      if (order.payment_provider !== "AIRPAY" && !order.notification_sent) {
         const retry = addButton(actions, "Kirim ulang notifikasi admin", async (event) => {
           retry.disabled = true;
           try {
@@ -212,9 +233,18 @@ function renderOrders(force = false) {
       const rejected = document.createElement("p"); rejected.className = "transaction-note";
       rejected.textContent = "Admin menandai pembayaran ini tidak valid. Hubungi admin untuk tindak lanjut.";
       card.append(rejected);
+    } else if (order.status === "EXPIRED") {
+      const expired = document.createElement("p"); expired.className = "transaction-note";
+      expired.textContent = order.payment_message || "Tagihan AirPay kedaluwarsa. Mulai kembali dari halaman akun untuk membuat pesanan baru.";
+      card.append(expired);
     }
 
-    if (["PENDING_PAYMENT", "PAYMENT_SUBMITTED"].includes(order.status)) {
+    if (
+      ["PENDING_PAYMENT", "PAYMENT_SUBMITTED"].includes(order.status)
+      && !(order.payment_provider === "AIRPAY" && (
+        order.has_qris || ["CREATING", "PENDING", "SUCCESS"].includes(order.airpay_status)
+      ))
+    ) {
       addButton(actions, "Batalkan pesanan", async () => {
         try {
           await api(`/api/payments/orders/${order.id}/cancel`, {method:"POST"});
@@ -227,14 +257,55 @@ function renderOrders(force = false) {
     if (actions.childElementCount) card.append(actions);
 
     if (order.status === "PENDING_PAYMENT" && expandedPaymentOrderId === order.id) {
-      const qr = document.createElement("img"); qr.className = "transaction-qr"; qr.src = "/api/payments/qris.jpeg";
-      qr.alt = "QRIS pembayaran Algentra Capital";
-      const warning = document.createElement("p"); warning.className = "transaction-note";
-      warning.textContent = "Pindai QRIS ini untuk membayar dan pastikan jumlah pembayaran sesuai total pesanan.";
-      card.append(qr, warning);
-      if (showProofFormForOrderId !== order.id) {
-        addButton(card, "Saya sudah bayar", () => { showProofFormForOrderId = order.id; renderOrders(true); });
+      if (order.payment_provider === "AIRPAY") {
+        if (order.has_qris) {
+          const qr = document.createElement("img"); qr.className = "transaction-qr";
+          qr.src = "/api/payments/orders/" + order.id + "/qris";
+          qr.alt = "QRIS AirPay untuk transaksi " + order.id;
+          card.append(qr);
+          const warning = document.createElement("p"); warning.className = "transaction-note";
+          warning.textContent = "Bayar tepat " + money(order.airpay_total_amount) + ". Status diperiksa otomatis; jangan gunakan QR ini setelah tagihan kedaluwarsa.";
+          card.append(warning);
+          if (order.payment_message) {
+            const message = document.createElement("p"); message.className = "transaction-note";
+            message.textContent = order.payment_message;
+            card.append(message);
+          }
+          addButton(card, "Cek status sekarang", async (event) => {
+            const button = event.currentTarget; button.disabled = true;
+            try {
+              await checkAirpayStatus(order.id);
+              await loadOrders(true, false);
+            } catch (error) {
+              transactionMessage.textContent = error.message;
+            } finally {
+              button.disabled = false;
+            }
+          }, true);
+        } else {
+          const note = document.createElement("p"); note.className = "transaction-note";
+          note.textContent = order.payment_message || "QRIS AirPay belum tersedia. Buat tagihan untuk melanjutkan pembayaran.";
+          card.append(note);
+          addButton(card, order.airpay_status === "CREATING" ? "Sedang membuat QRIS" : "Buat tagihan QRIS", async (event) => {
+            const button = event.currentTarget; button.disabled = true;
+            try {
+              await createAirpayInvoice(order.id);
+              await loadOrders(true, false);
+            } catch (error) {
+              transactionMessage.textContent = error.message;
+              button.disabled = false;
+            }
+          });
+        }
       } else {
+        const qr = document.createElement("img"); qr.className = "transaction-qr"; qr.src = "/api/payments/qris.jpeg";
+        qr.alt = "QRIS pembayaran Algentra Capital";
+        const warning = document.createElement("p"); warning.className = "transaction-note";
+        warning.textContent = "Pindai QRIS ini untuk membayar dan pastikan jumlah pembayaran sesuai total pesanan.";
+        card.append(qr, warning);
+        if (showProofFormForOrderId !== order.id) {
+          addButton(card, "Saya sudah bayar", () => { showProofFormForOrderId = order.id; renderOrders(true); });
+        } else {
         const form = document.createElement("form"); form.className = "transaction-proof-form";
         const label = document.createElement("label"); label.textContent = "Unggah bukti transaksi (JPG, PNG, atau WebP, maksimal 5 MB)";
         const input = document.createElement("input"); input.type = "file"; input.name = "file";
@@ -253,15 +324,69 @@ function renderOrders(force = false) {
         });
         card.append(form);
       }
+      }
     }
     transactionsList.append(card);
   }
 }
 
-async function loadOrders(force = false) {
+async function createAirpayInvoice(orderId) {
+  if (startingAirpayInvoices.has(orderId)) return;
+  startingAirpayInvoices.add(orderId);
+  try {
+    await api("/api/payments/orders/" + orderId + "/airpay", {method:"POST"});
+    transactionMessage.textContent = "Tagihan QRIS AirPay siap. Bayar sesuai total yang tertera.";
+  } finally {
+    startingAirpayInvoices.delete(orderId);
+  }
+}
+
+async function checkAirpayStatus(orderId) {
+  if (checkingAirpayOrders.has(orderId)) return;
+  checkingAirpayOrders.add(orderId);
+  try {
+    return await api("/api/payments/orders/" + orderId + "/airpay/status", {method:"POST"});
+  } finally {
+    checkingAirpayOrders.delete(orderId);
+  }
+}
+
+async function pollAirpayOrders() {
+  if (pollingAirpayOrders || document.hidden) return;
+  const pending = orders.filter((order) =>
+    order.payment_provider === "AIRPAY"
+    && ["PENDING_PAYMENT", "PAYMENT_SUBMITTED"].includes(order.status)
+    && order.has_qris
+  );
+  if (!pending.length) return;
+  pollingAirpayOrders = true;
+  try {
+    await Promise.all(pending.map((order) => checkAirpayStatus(order.id).catch(() => null)));
+    await loadOrders(false, false);
+  } finally {
+    pollingAirpayOrders = false;
+  }
+}
+
+async function loadOrders(force = false, createMissingInvoice = true) {
   try {
     orders = await api("/api/payments/orders", {cache:"no-store"});
     renderOrders(force);
+    if (createMissingInvoice) {
+      const order = orders.find((item) =>
+        item.payment_provider === "AIRPAY"
+        && item.status === "PENDING_PAYMENT"
+        && item.airpay_status === "NOT_CREATED"
+      );
+      if (order && !startingAirpayInvoices.has(order.id)) {
+        createAirpayInvoice(order.id)
+          .then(() => loadOrders(true, false))
+          .catch((error) => {
+            transactionMessage.textContent = error.message;
+            loadOrders(true, false);
+          });
+      }
+    }
   } catch (error) { transactionMessage.textContent = error.message; }
 }
 
@@ -271,6 +396,10 @@ receiptDialog.addEventListener("click", (event) => {
   if (event.target === receiptDialog) receiptDialog.close();
 });
 loadOrders();
-setInterval(() => { if (!document.hidden) loadOrders(); }, 7000);
+setInterval(async () => {
+  if (document.hidden) return;
+  await pollAirpayOrders();
+  await loadOrders();
+}, 7000);
 </script>
 {% endblock %}

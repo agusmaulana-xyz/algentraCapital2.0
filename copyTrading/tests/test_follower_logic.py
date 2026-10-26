@@ -149,6 +149,108 @@ def test_invalid_volume_is_not_retried(tmp_path, fake_mt5):
     assert len(attempts) == 1
 
 
+def test_cent_gold_uses_minimum_fallback_when_calculated_lot_is_below_broker_min(tmp_path, fake_mt5):
+    fake_mt5.info.volume_min = 0.01
+    fake_mt5.info.name = "XAUUSDc"
+    fake_mt5.account_info = lambda: SimpleNamespace(
+        margin_mode=2, balance=100.0, currency="USC", server="Broker-Cent",
+    )
+    engine = FollowerEngine(
+        config(tmp_path, map_simbol={"XAUUSD": "XAUUSDc"}),
+        fake_mt5,
+        tmp_path / "state.json",
+    )
+    signal = Signal(1, "cent-small", time.time(), "buka", 10, "XAUUSD", "buy", 0.001, 2300, 0, 2301, "")
+
+    assert engine.process_signal(signal, now=time.time()) == "sukses_dry_run"
+    assert engine.positions["10"]["volume_initial"] == 0.01
+
+
+def test_regular_symbol_uses_minimum_fallback_when_calculated_lot_is_below_broker_min(tmp_path, fake_mt5):
+    fake_mt5.info.volume_min = 0.01
+    fake_mt5.info.name = "EURUSD"
+    fake_mt5.account_info = lambda: SimpleNamespace(
+        margin_mode=2, balance=100.0, currency="USD", server="Broker-Standard",
+    )
+    engine = FollowerEngine(config(tmp_path), fake_mt5, tmp_path / "state.json")
+    signal = Signal(1, "regular-small", time.time(), "buka", 10, "EURUSD", "buy", 0.001, 1.1, 0, 1.2, "")
+
+    assert engine.process_signal(signal, now=time.time()) == "sukses_dry_run"
+    assert engine.positions["10"]["volume_initial"] == 0.01
+
+
+def test_zero_balance_mode_uses_minimum_broker_lot_when_enabled(tmp_path, fake_mt5):
+    fake_mt5.info.volume_min = 0.01
+    fake_mt5.info.name = "EURUSD"
+    fake_mt5.account_info = lambda: SimpleNamespace(
+        margin_mode=2, balance=0.0, currency="USD", server="Broker-Standard",
+    )
+    engine = FollowerEngine(
+        config(tmp_path, mode_lot="saldo", saldo_master=1000.0),
+        fake_mt5,
+        tmp_path / "state.json",
+    )
+    signal = Signal(1, "zero-balance", time.time(), "buka", 10, "EURUSD", "buy", 0.1, 1.1, 0, 1.2, "")
+
+    assert engine.process_signal(signal, now=time.time()) == "sukses_dry_run"
+    assert engine.positions["10"]["volume_initial"] == 0.01
+
+
+def test_cent_gold_retries_no_money_once_with_minimum_lot(tmp_path, fake_mt5):
+    fake_mt5.info.name = "XAUUSDc"
+    fake_mt5.account_info = lambda: SimpleNamespace(
+        margin_mode=2, balance=100.0, currency="USC", server="Broker-Cent",
+    )
+    engine = FollowerEngine(
+        config(tmp_path, dry_run=False, map_simbol={"XAUUSD": "XAUUSDc"}),
+        fake_mt5,
+        tmp_path / "state.json",
+    )
+    original = fake_mt5.order_send
+    attempts = []
+
+    def insufficient_then_success(request):
+        attempts.append(dict(request))
+        if len(attempts) == 1:
+            return SimpleNamespace(retcode=10019, comment="No money", order=0)
+        return original(request)
+
+    fake_mt5.order_send = insufficient_then_success
+    signal = Signal(1, "cent-margin", time.time(), "buka", 10, "XAUUSD", "buy", 0.1, 2300, 0, 2301, "")
+
+    assert engine.process_signal(signal, now=time.time()) == "sukses"
+    assert [request["volume"] for request in attempts] == [0.1, 0.01]
+    assert fake_mt5.positions[0].volume == 0.01
+
+
+def test_regular_gold_retries_no_money_once_at_broker_minimum(tmp_path, fake_mt5):
+    fake_mt5.info.name = "XAUUSD"
+    fake_mt5.account_info = lambda: SimpleNamespace(
+        margin_mode=2, balance=100.0, currency="USD", server="Broker-Standard",
+    )
+    engine = FollowerEngine(
+        config(tmp_path, dry_run=False, map_simbol={"XAUUSD": "XAUUSD"}),
+        fake_mt5,
+        tmp_path / "state.json",
+    )
+    attempts = []
+
+    original = fake_mt5.order_send
+
+    def insufficient_then_success(request):
+        attempts.append(dict(request))
+        if len(attempts) == 1:
+            return SimpleNamespace(retcode=10019, comment="No money", order=0)
+        return original(request)
+
+    fake_mt5.order_send = insufficient_then_success
+    signal = Signal(1, "regular-margin", time.time(), "buka", 10, "XAUUSD", "buy", 0.1, 2300, 0, 2301, "")
+
+    assert engine.process_signal(signal, now=time.time()) == "sukses"
+    assert [request["volume"] for request in attempts] == [0.1, 0.01]
+    assert fake_mt5.positions[0].volume == 0.01
+
+
 def test_retryable_retcode_allows_three_retries(tmp_path, fake_mt5, monkeypatch):
     engine = FollowerEngine(config(tmp_path, dry_run=False), fake_mt5, tmp_path / "state.json")
     attempts = []
@@ -188,10 +290,9 @@ def test_stop_levels_are_adjusted_to_minimum_distance(tmp_path, fake_mt5):
     assert engine._adjust_stops(info, "buy", 100, 99.95, 100.05) == (99.8, 100.2)
 
 
-def test_open_is_blocked_when_safety_cap_is_invalid_or_exceeded(tmp_path, fake_mt5):
+def test_zero_position_cap_means_no_application_limit(tmp_path, fake_mt5):
     engine = FollowerEngine(config(tmp_path, max_posisi_terbuka=0), fake_mt5, tmp_path / "state.json")
-    assert engine.process_signal(open_signal(ts=time.time()), now=time.time()) == "lewati_batas_pengaman"
-    assert engine.positions == {}
+    assert engine.process_signal(open_signal(ts=time.time()), now=time.time()) == "sukses_dry_run"
 
 
 def test_disconnected_terminal_is_a_retryable_connection_failure(tmp_path, fake_mt5):

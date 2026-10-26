@@ -6,7 +6,7 @@ from pydantic import SecretStr
 from app.auth import hash_password
 from app.database import SessionLocal
 from app.main import app
-from app.models import AppSetting, ClientUser, ManagedCopyProfile, MT5Account, PaymentOrder, utc_now
+from app.models import AppSetting, ClientUser, ManagedCopyProfile, MT5Account, PaymentOrder, PendingMT5Verification, utc_now
 from app.payment_bot import review_payment_order
 from app.routers import mt5 as mt5_router
 from app.token_crypto import decrypt_managed_copy_password
@@ -56,13 +56,44 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
             "plan": "ZERO",
             "execution_mode": "MANAGED",
         }
-        offline_order = client.post("/api/payments/orders", headers=csrf, json=managed_order)
+        assert client.get("/api/mt5/copier/jobs", headers=worker_headers).status_code == 200
+        assert client.post("/api/mt5/copier/heartbeat", headers=worker_headers, json={}).json() == {"status": "ok"}
+        assert client.post(
+            "/api/mt5/copier/heartbeat", headers={"X-Copier-Worker-Key": "wrong"}, json={}
+        ).status_code == 401
+        precheck = client.post(
+            "/api/mt5/prepayment-checks",
+            headers=csrf,
+            json={**managed_order, "broker_password": "prepayment-broker-secret"},
+        )
+        assert precheck.status_code == 202
+        check_id = precheck.json()["check_id"]
+        pending_checks = client.get("/api/mt5/copier/jobs", headers=worker_headers).json()["prepayment_checks"]
+        assert len(pending_checks) == 1
+        assert pending_checks[0]["check_id"] == check_id
+        assert pending_checks[0]["broker_password"] == "prepayment-broker-secret"
+        assert client.post(
+            f"/api/mt5/copier/prepayment-checks/{check_id}/result",
+            headers=worker_headers,
+            json={"valid": True, "message": "Login broker berhasil."},
+        ).json()["status"] == "VALID"
+        with SessionLocal() as db:
+            check = db.get(PendingMT5Verification, check_id)
+            assert check is not None
+            assert check.password_ciphertext != "prepayment-broker-secret"
+            assert decrypt_managed_copy_password(check.password_ciphertext) == "prepayment-broker-secret"
+
+        order_payload = {**managed_order, "prepayment_check_id": check_id}
+        with SessionLocal() as db:
+            db.delete(db.get(AppSetting, "managed_copy_worker_seen_at"))
+            db.commit()
+        offline_order = client.post("/api/payments/orders", headers=csrf, json=order_payload)
         assert offline_order.status_code == 409
         assert client.get("/api/mt5/copier/jobs", headers=worker_headers).status_code == 200
         order_response = client.post(
             "/api/payments/orders",
             headers=csrf,
-            json=managed_order,
+            json=order_payload,
         )
         assert order_response.status_code == 201
         assert order_response.json()["execution_mode"] == "MANAGED"
@@ -79,11 +110,20 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
             approved_account = db.get(MT5Account, approved_account_id)
             assert approved_account.execution_mode == "MANAGED"
             assert approved_account.token_ciphertext is None
+            approved_profile = db.get(ManagedCopyProfile, approved_account_id)
+            assert approved_profile is not None
+            assert approved_profile.login_status == "VALID"
+            assert decrypt_managed_copy_password(approved_profile.password_ciphertext) == "prepayment-broker-secret"
+            provisioned_check = db.get(PendingMT5Verification, check_id)
+            assert provisioned_check is not None
+            assert provisioned_check.status == "PROVISIONED"
+            assert provisioned_check.password_ciphertext != "prepayment-broker-secret"
 
         account_list = client.get("/api/mt5/accounts")
         assert account_list.status_code == 200
         assert account_list.json()[0]["execution_mode"] == "MANAGED"
-        assert account_list.json()[0]["managed_copy"]["configured"] is False
+        approved_summary = next(item for item in account_list.json() if item["id"] == approved_account_id)
+        assert approved_summary["managed_copy"]["configured"] is True
         account_page = client.get("/account")
         assert account_page.status_code == 200
         assert "Dikelola server" in account_page.text
@@ -148,7 +188,9 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
         jobs = client.get("/api/mt5/copier/jobs", headers=worker_headers)
         assert jobs.status_code == 200
         assert jobs.headers["cache-control"] == "no-store"
-        assert jobs.json()["jobs"] == []
+        assert len(jobs.json()["jobs"]) == 1
+        assert jobs.json()["jobs"][0]["account_id"] == approved_account_id
+        assert jobs.json()["jobs"][0]["active"] is False
         assert jobs.json()["login_checks"][0]["account_id"] == account_id
         check_result = client.post(
             f"/api/mt5/copier/jobs/{account_id}/login-check",
@@ -254,7 +296,51 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
         assert changed_while_active.status_code == 409
         paused = client.put(start_path, headers=csrf, json={"active": False})
         assert paused.status_code == 200
-        assert paused.json()["status"] == "PAUSED"
+        assert paused.json()["status"] == "STANDBY"
+
+        ea_order = {
+            "label": "EA follower",
+            "server": "Broker-EA-Demo",
+            "login": "777222",
+            "plan": "ZERO",
+            "execution_mode": "EA",
+        }
+        ea_check = client.post(
+            "/api/mt5/prepayment-checks",
+            headers=csrf,
+            json={**ea_order, "broker_password": "temporary-ea-password"},
+        )
+        assert ea_check.status_code == 202
+        ea_check_id = ea_check.json()["check_id"]
+        assert client.post(
+            f"/api/mt5/copier/prepayment-checks/{ea_check_id}/result",
+            headers=worker_headers,
+            json={"valid": True, "message": "Login broker berhasil."},
+        ).json()["status"] == "VALID"
+        with SessionLocal() as db:
+            ea_pending = db.get(PendingMT5Verification, ea_check_id)
+            assert ea_pending is not None
+            assert ea_pending.password_ciphertext == ""
+        ea_order_response = client.post(
+            "/api/payments/orders",
+            headers=csrf,
+            json={**ea_order, "prepayment_check_id": ea_check_id},
+        )
+        assert ea_order_response.status_code == 201
+        ea_order_id = ea_order_response.json()["id"]
+        with SessionLocal() as db:
+            assert db.get(PendingMT5Verification, ea_check_id) is None
+            assert db.get(PaymentOrder, ea_order_id).prepayment_check_id is None
+            order = db.get(PaymentOrder, ea_order_id)
+            order.status = "PAYMENT_SUBMITTED"
+            db.commit()
+        ea_review_status, ea_account_id = review_payment_order(ea_order_id, "accept")
+        assert ea_review_status == "APPROVED"
+        with SessionLocal() as db:
+            ea_account = db.get(MT5Account, ea_account_id)
+            assert ea_account is not None
+            assert ea_account.token_ciphertext is not None
+            assert db.get(ManagedCopyProfile, ea_account_id) is None
 
         with SessionLocal() as db:
             profile = db.get(ManagedCopyProfile, account_id)
@@ -263,5 +349,7 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
             db.query(MT5Account).filter_by(id=account_id).delete()
             db.query(MT5Account).filter_by(id=approved_account_id).delete()
             db.query(PaymentOrder).filter_by(id=order_id).delete()
+            db.query(MT5Account).filter_by(id=ea_account_id).delete()
+            db.query(PaymentOrder).filter_by(id=ea_order_id).delete()
             db.query(ClientUser).filter_by(email=email).delete()
             db.commit()

@@ -12,7 +12,7 @@
 
   <section>
     <h2>Hubungkan akun Copy Trading</h2>
-    <p class="section-help">Pilih cara menjalankan akun, paket, dan detail akun broker. Akun dibuat setelah pembayaran disetujui. Untuk layanan dikelola server, password broker dienkripsi dan hanya dikirim ke worker copier yang terautentikasi.</p>
+    <p class="section-help">Isi nama akun, ID akun MT5, server, dan password trading. Kami cek koneksi login terlebih dahulu tanpa mengirim order; tombol lanjut bayar aktif setelah login berhasil. Untuk mode dikelola server, password dienkripsi dan hanya dipakai worker untuk mempertahankan atau memulihkan koneksi terminal. Untuk mode EA sendiri, password dihapus setelah pemeriksaan.</p>
     <form id="account-form" class="form-grid account-connect-form">
       <fieldset class="plan-picker">
         <legend>Cara menjalankan copy trading</legend>
@@ -46,10 +46,17 @@
         </div>
         <p class="field-help">Total pembayaran mengikuti harga paket yang dipilih. QRIS untuk pembayaran ditampilkan pada halaman transaksi.</p>
       </fieldset>
-      <label>Nama akun<input name="label" maxlength="80" placeholder="Copy Trading 1" required></label>
-      <label>Server broker<input name="server" maxlength="128" placeholder="BrokerName-Live" required></label>
-      <label>Nomor akun broker<input name="login" maxlength="32" inputmode="numeric" pattern="[0-9]+" title="Nomor akun MT5 hanya boleh berisi angka" aria-describedby="account-login-help" required><span id="account-login-help" class="field-help">Masukkan nomor login MT5 berupa angka saja, tanpa spasi.</span></label>
-      <div><button type="submit">Lanjutkan ke pembayaran</button></div>
+      <label>Nama akun copy<input name="label" maxlength="80" placeholder="Copy Trading 1" required></label>
+      <label>Server broker
+        <span class="broker-server-picker">
+          <input id="broker-server" name="server" maxlength="128" placeholder="Cari nama broker atau server" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="broker-server-options" required>
+          <span id="broker-server-options" class="broker-server-options" role="listbox" hidden></span>
+        </span>
+        <span id="broker-server-help" class="field-help">Ketik minimal 3 huruf untuk mencari server broker. Server dapat dimasukkan manual jika tidak muncul.</span>
+      </label>
+      <label>ID akun MT5<input name="login" maxlength="32" inputmode="numeric" pattern="[0-9]+" title="ID akun MT5 hanya boleh berisi angka" aria-describedby="account-login-help" required><span id="account-login-help" class="field-help">Masukkan ID login MT5 berupa angka saja, tanpa spasi.</span></label>
+      <label>Password trading MT5<input id="broker-password" type="password" maxlength="128" autocomplete="current-password" required><span class="field-help">Dipakai untuk memeriksa login dan menjaga worker dapat menyambungkan terminal kembali. Jangan masukkan password investor/read-only.</span></label>
+      <div class="account-connect-actions"><button id="check-mt5-login" type="button" disabled>Periksa koneksi MT5</button><button id="continue-to-payment" type="submit" disabled>Lanjutkan ke pembayaran</button></div>
     </form>
     <p id="account-message" class="status" role="status"></p>
     <div id="new-token" hidden></div>
@@ -66,7 +73,7 @@
 
   <section>
     <h2>Akun Copy Trading Anda</h2>
-    <p class="section-help">Kelola hingga 10 akun. Pilih <strong>Mulai copy trading</strong> hanya setelah mengecek login, ukuran lot, dan batas risiko. Job server akan menjalankan order live pada akun broker Anda.</p>
+    <p class="section-help">Kelola hingga 10 akun. Pilih <strong>Mulai copy trading</strong> setelah mengecek login dan metode ukuran lot. Job server mengirim order live sesuai ukuran tersebut; batas volume broker dan kecukupan margin tetap berlaku.</p>
     <div id="accounts" class="grid"></div>
   </section>
 
@@ -79,8 +86,8 @@
     <ol>
       <li>Hubungkan akun Copy Trading di atas. Salin token yang muncul; token hanya terlihat saat dibuat atau dirotasi.</li>
       <li>Di MT5, pilih <strong>File → Open Data Folder</strong>, buka folder <code>MQL5/Experts</code>, lalu salin file <code>.mq5</code> yang diunduh ke sana. Buka file itu di MetaEditor dan tekan <strong>F7</strong>; hasil compile <code>.ex5</code> siap digunakan di folder tersebut.</li>
-      <li>Di MT5, pilih <strong>Tools → Options → Expert Advisors</strong>, aktifkan <em>Allow WebRequest for listed URL</em>, lalu tambahkan <code>https://algentracapital.my.id</code>.</li>
-      <li>Dari <strong>Navigator → Expert Advisors</strong>, pasang EA Copy Trading di chart. Isi <code>AccountToken</code> dengan token akun tersebut, pastikan <code>ServerURL</code> benar, lalu aktifkan <strong>Algo Trading</strong>.</li>
+      <li>Di MT5, pilih <strong>Tools → Options → Expert Advisors</strong>, aktifkan <em>Allow WebRequest for listed URL</em>, lalu tambahkan <code>http://127.0.0.1:8000</code>.</li>
+      <li>Dari <strong>Navigator → Expert Advisors</strong>, pasang EA Copy Trading di chart. Isi <code>AccountToken</code> dengan token akun tersebut, pastikan <code>ServerURL</code> berisi <code>http://127.0.0.1:8000</code>, lalu aktifkan <strong>Algo Trading</strong>. MT5 harus berjalan di komputer yang sama dengan backend agar alamat localhost ini terjangkau.</li>
       <li>Pastikan EA utama Algentra aktif. EA Copy Trading akan menyalin posisi live saat izin trading MT5 aktif; atur <code>VolumeMultiplier</code> sesuai kebutuhan sebelum menjalankannya.</li>
     </ol>
     <div class="notice-box" role="note" aria-label="Bantuan pesan status EA Copy Trading">
@@ -124,14 +131,192 @@ const performanceUpdated = document.querySelector("#client-performance-updated")
 const clientPlans = {{ client_plans | tojson }};
 let managedFormDirty = false;
 let managedWorkerReady = {{ 'true' if managed_copy_enabled else 'false' }};
+let prepaymentCheckId = null;
+let prepaymentCheckExpiresAt = 0;
+let prepaymentCheckRun = 0;
+let prepaymentSessionTimer = null;
 
 const accountLoginInput = document.querySelector('#account-form [name="login"]');
 accountLoginInput.addEventListener("input", () => {
   accountLoginInput.setCustomValidity(accountLoginInput.validity.patternMismatch ? "Nomor akun MT5 hanya boleh berisi angka, tanpa spasi." : "");
 });
 
+const accountForm = document.querySelector("#account-form");
+const brokerPasswordInput = document.querySelector("#broker-password");
+const brokerServerInput = document.querySelector("#broker-server");
+const brokerServerOptions = document.querySelector("#broker-server-options");
+const brokerServerHelp = document.querySelector("#broker-server-help");
+const prepaymentCheckButton = document.querySelector("#check-mt5-login");
+const continuePaymentButton = document.querySelector("#continue-to-payment");
+let brokerSearchTimer = null;
+let brokerSearchRun = 0;
+
+function invalidatePrepaymentCheck() {
+  prepaymentCheckRun += 1;
+  prepaymentCheckId = null;
+  prepaymentCheckExpiresAt = 0;
+  if (prepaymentSessionTimer) clearInterval(prepaymentSessionTimer);
+  prepaymentSessionTimer = null;
+  brokerPasswordInput.required = true;
+  continuePaymentButton.disabled = true;
+  if (!prepaymentCheckButton.disabled) statusBox.textContent = "Data akun berubah. Periksa koneksi MT5 kembali sebelum melanjutkan pembayaran.";
+}
+
+accountForm.addEventListener("input", invalidatePrepaymentCheck);
+accountForm.addEventListener("change", invalidatePrepaymentCheck);
+
+function closeBrokerServerOptions() {
+  brokerServerOptions.hidden = true;
+  brokerServerOptions.replaceChildren();
+  brokerServerInput.setAttribute("aria-expanded", "false");
+}
+
+brokerServerInput.addEventListener("input", () => {
+  clearTimeout(brokerSearchTimer);
+  const query = brokerServerInput.value.trim();
+  const run = ++brokerSearchRun;
+  closeBrokerServerOptions();
+  if (query.length < 3) {
+    brokerServerHelp.textContent = "Ketik minimal 3 huruf untuk mencari server broker. Server dapat dimasukkan manual jika tidak muncul.";
+    return;
+  }
+  brokerServerHelp.textContent = "Mencari server broker…";
+  brokerSearchTimer = setTimeout(async () => {
+    try {
+      const result = await api(`/api/mt5/servers?q=${encodeURIComponent(query)}`, {cache:"no-store"});
+      if (run !== brokerSearchRun || brokerServerInput.value.trim() !== query) return;
+      const servers = Array.isArray(result.servers) ? result.servers : [];
+      brokerServerOptions.replaceChildren();
+      for (const server of servers) {
+        if (!server || typeof server.name !== "string") continue;
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "broker-server-option";
+        option.setAttribute("role", "option");
+        option.textContent = server.company ? `${server.name} · ${server.company}` : server.name;
+        option.addEventListener("click", () => {
+          brokerServerInput.value = server.name;
+          closeBrokerServerOptions();
+          brokerServerHelp.textContent = "Server dipilih dari direktori broker.";
+          brokerServerInput.dispatchEvent(new Event("change", {bubbles:true}));
+        });
+        brokerServerOptions.append(option);
+      }
+      if (brokerServerOptions.childElementCount) {
+        brokerServerOptions.hidden = false;
+        brokerServerInput.setAttribute("aria-expanded", "true");
+        brokerServerHelp.textContent = "Pilih server yang sesuai dengan akun MT5 Anda. Server juga bisa diketik manual.";
+      } else {
+        brokerServerHelp.textContent = "Tidak ada pilihan yang cocok. Periksa nama server di MT5 atau masukkan manual.";
+      }
+    } catch (error) {
+      if (run === brokerSearchRun) brokerServerHelp.textContent = "Direktori server tidak tersedia. Masukkan nama server persis seperti di MT5.";
+    }
+  }, 350);
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".broker-server-picker")) closeBrokerServerOptions();
+});
+
+prepaymentCheckButton.addEventListener("click", async () => {
+  statusBox.textContent = "";
+  const hasUsableCheck = Boolean(prepaymentCheckId);
+  brokerPasswordInput.required = true;
+  if (!accountForm.reportValidity()) {
+    if (hasUsableCheck) brokerPasswordInput.required = false;
+    return;
+  }
+  const run = ++prepaymentCheckRun;
+  if (prepaymentSessionTimer) clearInterval(prepaymentSessionTimer);
+  prepaymentSessionTimer = null;
+  const checkStartedAt = Date.now();
+  prepaymentCheckId = null;
+  prepaymentCheckExpiresAt = 0;
+  continuePaymentButton.disabled = true;
+  prepaymentCheckButton.disabled = true;
+  const payload = {
+    label: accountForm.elements.label.value,
+    server: brokerServerInput.value,
+    login: accountLoginInput.value,
+    plan: accountForm.querySelector('[name="plan"]:checked')?.value,
+    execution_mode: accountForm.querySelector('[name="execution_mode"]:checked')?.value,
+    broker_password: brokerPasswordInput.value,
+  };
+  try {
+    const check = await api("/api/mt5/prepayment-checks", {method:"POST", body:JSON.stringify(payload)});
+    brokerPasswordInput.value = "";
+    statusBox.textContent = "Login MT5 sedang diperiksa. Proses ini hanya menguji koneksi dan tidak mengirim order.";
+    let finalResult = null;
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (run !== prepaymentCheckRun) return;
+      finalResult = await api(`/api/mt5/prepayment-checks/${encodeURIComponent(check.check_id)}`, {cache:"no-store"});
+      if (["VALID", "INVALID", "EXPIRED"].includes(finalResult.status)) break;
+    }
+    if (run !== prepaymentCheckRun) return;
+    if (finalResult?.status === "VALID") {
+      prepaymentCheckId = check.check_id;
+      prepaymentCheckExpiresAt = checkStartedAt + 30 * 60 * 1000;
+      brokerPasswordInput.required = false;
+      continuePaymentButton.disabled = false;
+      if (payload.execution_mode === "MANAGED") {
+        await refreshPrepaymentSession();
+        prepaymentSessionTimer = setInterval(() => {
+          if (!document.hidden && prepaymentCheckId) refreshPrepaymentSession();
+        }, 3000);
+      } else {
+        statusBox.textContent = "Login broker berhasil. Anda dapat melanjutkan ke pembayaran.";
+      }
+    } else if (finalResult?.status === "INVALID") {
+      statusBox.textContent = finalResult.message || "Login gagal. Periksa ID akun, server, dan password MT5 lalu coba lagi.";
+    } else if (finalResult?.status === "EXPIRED") {
+      statusBox.textContent = finalResult.message || "Sesi pemeriksaan berakhir. Periksa koneksi MT5 kembali.";
+    } else {
+      statusBox.textContent = "Pemeriksaan MT5 belum mendapat jawaban dalam 3 menit. Pastikan worker online lalu coba lagi.";
+    }
+  } catch (error) {
+    if (run === prepaymentCheckRun) statusBox.textContent = error.message;
+  } finally {
+    if (run === prepaymentCheckRun) prepaymentCheckButton.disabled = false;
+  }
+});
+
 const formatMoney = (value, currency) => `${Number(value || 0).toLocaleString("id-ID", {minimumFractionDigits:2, maximumFractionDigits:2})} ${currency || ""}`.trim();
 const modeLabel = (mode) => ({real:"Live", demo:"Demo", contest:"Kompetisi"}[mode] || mode || "MT5");
+
+async function refreshPrepaymentSession() {
+  if (!prepaymentCheckId) return;
+  try {
+    const session = await api("/api/mt5/prepayment-checks/" + encodeURIComponent(prepaymentCheckId), {cache:"no-store"});
+    if (session.status === "EXPIRED") {
+      prepaymentCheckId = null;
+      continuePaymentButton.disabled = true;
+      if (prepaymentSessionTimer) clearInterval(prepaymentSessionTimer);
+      prepaymentSessionTimer = null;
+      statusBox.textContent = session.message || "Sesi MT5 kedaluwarsa. Periksa koneksi kembali sebelum membayar.";
+      return;
+    }
+    if (session.status !== "VALID") return;
+    if (!session.session_connected) {
+      statusBox.textContent = "Login MT5 sudah terverifikasi. Menunggu pembaruan sesi dan saldo realtime dari worker.";
+      return;
+    }
+    const balance = session.balance == null ? "saldo belum diterima" : "Saldo " + formatMoney(session.balance, session.currency);
+    const equity = session.equity == null ? "" : " · Ekuitas " + formatMoney(session.equity, session.currency);
+    const floating = session.floating_profit == null ? "" : " · Floating " + formatMoney(session.floating_profit, session.currency);
+    const observed = session.session_observed_at
+      ? " · Diperbarui " + new Date(session.session_observed_at).toLocaleTimeString("id-ID", {timeZone:"Asia/Jakarta"}) + " WIB"
+      : "";
+    const permissionWarning =
+      session.account_trade_allowed === false || session.terminal_trade_allowed === false || session.expert_trade_allowed === false
+        ? " · Izin trading MT5 belum lengkap; saldo tetap tampil, tetapi order baru menunggu izin aktif."
+        : "";
+    statusBox.textContent = "Login MT5 tersambung · " + balance + equity + floating + observed + ". Copy trading tetap off sampai Anda menekan Mulai." + permissionWarning;
+  } catch (error) {
+    statusBox.textContent = "Sesi MT5 tersimpan; pembaruan saldo tertunda: " + error.message;
+  }
+}
 
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
@@ -160,27 +345,28 @@ function addManagedAccountCard(card, account, plan) {
   const detail = document.createElement("p"); detail.textContent = `Dikelola server · ${account.login} · ${account.server} · ${plan.name}`;
   const profile = account.managed_copy || {configured:false, active:false, status:"SETUP_REQUIRED"};
   const state = document.createElement("p"); state.className = "muted";
-  state.textContent = `${profile.active ? "Copy aktif" : "Copy dijeda"} · Worker terakhir terhubung: ${profile.last_seen_at ? new Date(profile.last_seen_at).toLocaleString("id-ID", {timeZone:"Asia/Jakarta"}) : "belum terhubung"}`;
+  state.textContent = `${profile.active ? "Copy aktif" : "Copy off · standby"} · Worker terakhir terhubung: ${profile.last_seen_at ? new Date(profile.last_seen_at).toLocaleString("id-ID", {timeZone:"Asia/Jakarta"}) : "belum terhubung"}`;
   const loginState = document.createElement("p"); loginState.className = "account-login-check"; loginState.setAttribute("role", "status"); loginState.setAttribute("aria-live", "polite");
   const loginMessages = {
-    UNCHECKED: "Login broker belum diperiksa. Simpan kredensial untuk memulai pemeriksaan otomatis.",
-    CHECKING: "Sedang memeriksa login broker dan kesiapan terminal MT5…",
-    VALID: profile.login_message || "Login broker berhasil dan terminal siap.",
+    UNCHECKED: "Login broker belum diperiksa.",
+    CHECKING: "Sedang menghubungkan akun MT5…",
+    VALID: profile.login_message || "Login broker terhubung. Copy trading siap menunggu tombol Mulai.",
     ERROR: profile.login_message || "Login belum berhasil. Periksa nomor akun, password trading, dan server broker."
   };
   loginState.textContent = loginMessages[profile.login_status] || loginMessages.UNCHECKED;
   loginState.classList.add(profile.login_status === "VALID" ? "account-login-check--valid" : profile.login_status === "ERROR" ? "account-login-check--error" : "account-login-check--pending");
   const stateLabels = {
     SETUP_REQUIRED: "Masukkan password broker dan atur batas copy terlebih dahulu.",
-    PAUSED: "Copy trading dijeda. Tidak ada order baru yang dikirim.",
-    STARTING: "Permintaan diterima. Menunggu worker copier mengambil job.",
-    RUNNING: "Worker copier tersambung. Periksa terminal dan akun broker secara berkala.",
+    PAUSED: "Copy trading off. Tidak ada order baru yang dikirim.",
+    STANDBY: profile.status_message || "Terminal tersambung dan saldo tersinkron. Copy trading off, menunggu tombol Mulai.",
+    STARTING: profile.status_message || "Permintaan diterima. Menyiapkan koneksi akun client dan akun utama.",
+    RUNNING: profile.status_message || "Worker copier tersambung. Periksa terminal dan akun broker secara berkala.",
     OFFLINE: "Worker copier tidak mengirim heartbeat terbaru. Akun tidak sedang disinkronkan.",
     ERROR: profile.status_message || "Worker copier melaporkan kendala. Periksa server dan akun broker.",
     STOPPED: "Worker copier berhenti. Periksa konfigurasi server."
   };
   const connection = document.createElement("div");
-  connection.className = `account-state account-state--${profile.status === "RUNNING" ? "ready" : profile.status === "PAUSED" || profile.status === "SETUP_REQUIRED" ? "disabled" : "offline"}`;
+  connection.className = `account-state account-state--${profile.status === "RUNNING" || profile.status === "STANDBY" ? "ready" : profile.status === "PAUSED" || profile.status === "SETUP_REQUIRED" ? "disabled" : "offline"}`;
   connection.setAttribute("role", "status");
   const connectionText = document.createElement("span"); connectionText.textContent = stateLabels[profile.status] || stateLabels.SETUP_REQUIRED;
   connection.append(connectionText);
@@ -197,12 +383,12 @@ function addManagedAccountCard(card, account, plan) {
     if (type === "number") input.required = true;
     wrapper.append(input); form.append(wrapper); fields[name] = input;
   };
-  addInput("broker_password", "Password akun broker", "password", undefined);
+  addInput("broker_password", profile.configured ? "Password akun broker (opsional, hanya untuk mengganti)" : "Password akun broker", "password", undefined);
   fields.broker_password.autocomplete = "off";
   fields.broker_password.maxLength = 128;
-  fields.broker_password.required = true;
-  fields.broker_password.placeholder = profile.configured ? "Masukkan ulang untuk mengganti password tersimpan" : "Password trading akun follower";
-  addInput("follower_symbol", "Nama simbol XAUUSD di broker", "text", profile.follower_symbol || "XAUUSD");
+  fields.broker_password.required = !profile.configured;
+  fields.broker_password.placeholder = profile.configured ? "Kosongkan agar tidak login ulang" : "Password trading akun follower";
+  addInput("follower_symbol", "Simbol emas di broker (akun cent memakai XAUUSDc otomatis)", "text", profile.follower_symbol || "XAUUSD");
   fields.follower_symbol.maxLength = 64;
   fields.follower_symbol.pattern = "[A-Za-z0-9._-]+";
   const modeLabel = document.createElement("label"); modeLabel.textContent = "Metode ukuran lot";
@@ -212,22 +398,28 @@ function addManagedAccountCard(card, account, plan) {
   }
   mode.value = profile.mode_lot || "rasio"; modeLabel.append(mode); form.append(modeLabel);
   fields.mode_lot = mode;
-  addInput("ratio_lot", "Pengali lot rasio", "number", profile.ratio_lot ?? 1, "0.01", "5", "0.01");
-  addInput("lot_tetap", "Lot tetap", "number", profile.lot_tetap ?? 0.01, "0.01", "5", "0.01");
-  addInput("max_lot_per_order", "Batas lot per order", "number", profile.max_lot_per_order ?? 0.05, "0.01", "5", "0.01");
-  addInput("max_lot_total", "Batas total lot terbuka", "number", profile.max_lot_total ?? 0.1, "0.01", "10", "0.01");
-  addInput("max_open_positions", "Maksimum posisi terbuka", "number", profile.max_open_positions ?? 3, "1", "50", "1");
+  addInput("ratio_lot", "Pengali lot rasio", "number", profile.ratio_lot ?? 1, "0.01", undefined, "0.01");
+  addInput("lot_tetap", "Lot tetap", "number", profile.lot_tetap ?? 0.01, "0.01", undefined, "0.01");
+  const unlimitedNote = document.createElement("p");
+  unlimitedNote.className = "section-help";
+  unlimitedNote.textContent = "Batas internal lot per order, total lot, dan jumlah posisi dinonaktifkan. Lot mengikuti metode di atas; batas volume simbol, margin, dan izin broker tetap berlaku.";
+  form.append(unlimitedNote);
   form.addEventListener("input", () => { managedFormDirty = true; });
   form.addEventListener("change", () => { managedFormDirty = true; });
   const save = document.createElement("button"); save.type = "submit"; save.textContent = profile.configured ? "Simpan pengaturan" : "Simpan kredensial dan pengaturan"; form.append(save);
   form.addEventListener("submit", async (event) => {
     event.preventDefault(); statusBox.textContent = "";
     const data = Object.fromEntries(new FormData(form).entries());
-    for (const key of ["ratio_lot", "lot_tetap", "max_lot_per_order", "max_lot_total", "max_open_positions"]) data[key] = Number(data[key]);
+    for (const key of ["ratio_lot", "lot_tetap"]) data[key] = Number(data[key]);
+    data.max_lot_per_order = 0;
+    data.max_lot_total = 0;
+    data.max_open_positions = 0;
     try {
       await api(`/api/mt5/accounts/${account.id}/managed-copy`, {method:"PUT", body:JSON.stringify(data)});
       managedFormDirty = false;
-      statusBox.textContent = "Pengaturan tersimpan. Login broker sedang diperiksa otomatis; copy trading masih dijeda.";
+      statusBox.textContent = data.broker_password
+        ? "Password diperbarui. Koneksi MT5 sedang diperiksa; copy trading tetap off."
+        : "Pengaturan tersimpan. Sesi MT5 tetap aktif dan copy trading tetap off sampai Anda menekan Mulai.";
       await loadAccounts();
     } catch (error) { statusBox.textContent = error.message; }
   });
@@ -235,11 +427,11 @@ function addManagedAccountCard(card, account, plan) {
   const controls = document.createElement("div"); controls.className = "toolbar";
   const toggle = document.createElement("button"); toggle.type = "button";
   toggle.className = profile.active ? "secondary" : "";
-  toggle.textContent = profile.active ? "Jeda copy trading" : "Mulai copy trading (live)";
+  toggle.textContent = profile.active ? "Jeda copy trading" : "Mulai copy trading";
   toggle.disabled = !profile.configured || (!profile.active && (!managedWorkerReady || profile.login_status !== "VALID"));
   toggle.addEventListener("click", async () => {
     const active = !profile.active;
-    if (active && !confirm("Konfirmasi: job ini akan mengirim order live ke akun broker Anda. Pastikan akun demo sudah diuji, login/server benar, serta batas lot dan posisi sesuai. Lanjutkan?")) return;
+    if (active && !confirm("Konfirmasi: job ini akan mengirim order live ke akun broker Anda tanpa batas internal lot total atau jumlah posisi. Pastikan login/server dan metode ukuran lot benar serta dana dan margin mencukupi. Lanjutkan?")) return;
     try {
       await api(`/api/mt5/accounts/${account.id}/managed-copy/active`, {method:"PUT", body:JSON.stringify({active, acknowledge_live_risk:active})});
       await loadAccounts();
@@ -290,10 +482,10 @@ function addAccountCard(account) {
   };
   const connectionStatus = statusLabels[account.connection_status] ? account.connection_status : "offline";
   const connectionState = document.createElement("div");
-  connectionState.className = `account-state account-state--${connectionStatus}`;
+  connectionState.className = `account-state account-state--${account.copy_error ? "offline" : connectionStatus}`;
   connectionState.setAttribute("role", "status");
   const dot = document.createElement("span"); dot.className = "account-state__dot"; dot.textContent = connectionStatus === "ready" ? "✓" : ""; dot.setAttribute("aria-hidden", "true");
-  const message = document.createElement("span"); message.textContent = statusLabels[connectionStatus];
+  const message = document.createElement("span"); message.textContent = account.copy_error || statusLabels[connectionStatus];
   connectionState.append(dot, message);
   const controls = document.createElement("div"); controls.className = "toolbar";
   const edit = document.createElement("button"); edit.className = "secondary"; edit.textContent = "Edit akun";
@@ -365,13 +557,14 @@ async function loadAccounts() {
     managedWorkerReady = managedService.available === true;
     const managedMode = document.querySelector("#execution-managed");
     const eaMode = document.querySelector("#execution-ea");
+    prepaymentCheckButton.disabled = !managedWorkerReady;
     managedMode.disabled = !managedWorkerReady;
     if (!managedWorkerReady && managedMode.checked) eaMode.checked = true;
     document.querySelector("#managed-copy-service-status").textContent = managedWorkerReady
-      ? "Worker managed copy online. Akun managed dapat didaftarkan dan dijalankan."
+      ? "Worker MT5 online. Pemeriksaan koneksi tersedia dan akun managed dapat didaftarkan."
       : managedService.configured
-        ? "Worker managed copy offline. Layanan managed belum dapat dipesan atau dimulai."
-        : "Layanan managed belum dikonfigurasi di server. Anda tetap dapat memilih Pasang EA sendiri.";
+        ? "Worker MT5 offline. Pemeriksaan koneksi sebelum pembayaran untuk semua mode sedang tidak tersedia."
+        : "Worker MT5 belum dikonfigurasi. Pemeriksaan koneksi sebelum pembayaran sedang tidak tersedia.";
     renderClientSummary(performance);
     accountsBox.replaceChildren();
     const eaSection = document.querySelector("#ea-install-section");
@@ -381,16 +574,27 @@ async function loadAccounts() {
   } catch (error) { statusBox.textContent = error.message; }
 }
 
-document.querySelector("#account-form").addEventListener("submit", async (event) => {
+accountForm.addEventListener("submit", async (event) => {
   event.preventDefault(); statusBox.textContent = "";
-  const accountForm = event.currentTarget;
+  if (!prepaymentCheckId) {
+    statusBox.textContent = "Periksa koneksi login MT5 terlebih dahulu sebelum melanjutkan pembayaran.";
+    continuePaymentButton.disabled = true;
+    return;
+  }
+  if (Date.now() >= prepaymentCheckExpiresAt) {
+    invalidatePrepaymentCheck();
+    statusBox.textContent = "Sesi pemeriksaan login sudah berakhir. Periksa koneksi MT5 kembali sebelum melanjutkan.";
+    return;
+  }
   const formData = new FormData(accountForm);
   const payload = Object.fromEntries(formData.entries());
+  payload.prepayment_check_id = prepaymentCheckId;
+  continuePaymentButton.disabled = true;
   try {
     const order = await api("/api/payments/orders", {method:"POST", body:JSON.stringify(payload)});
     accountForm.reset();
     window.location.assign(`/transactions?order=${encodeURIComponent(order.id)}`);
-  } catch (error) { statusBox.textContent = error.message; }
+  } catch (error) { statusBox.textContent = error.message; continuePaymentButton.disabled = !prepaymentCheckId; }
 });
 
 loadAccounts();

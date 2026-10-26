@@ -1,14 +1,16 @@
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..broker_directory import BrokerDirectoryError, search_mt5_servers
 from ..database import get_db
 from ..models import (
     AppSetting,
@@ -19,6 +21,7 @@ from ..models import (
     MT5Account,
     MT5AccountState,
     MT5HistoryDeal,
+    PendingMT5Verification,
     utc_now,
 )
 from ..mt5_performance import get_mt5_performance
@@ -28,8 +31,10 @@ from ..schemas import (
     ManagedCopyLoginCheckResult,
     ManagedCopySetup,
     ManagedCopyWorkerStatus,
+    PrepaymentMT5SessionReport,
     MT5AccountActive,
     MT5AccountUpdate,
+    PrepaymentMT5CheckRequest,
 )
 from ..config import get_settings
 from ..security import csrf_token, require_csrf
@@ -45,6 +50,20 @@ router = APIRouter(prefix="/api/mt5", tags=["mt5"])
 MASTER_SNAPSHOT_MAX_AGE = timedelta(seconds=20)
 FOLLOWER_ONLINE_MAX_AGE = timedelta(seconds=30)
 MANAGED_WORKER_ONLINE_MAX_AGE = timedelta(seconds=30)
+
+
+def require_client_id(request: Request, db: Session = Depends(get_db)) -> int:
+    user_id = request.session.get("client_user_id")
+    if not isinstance(user_id, int):
+        raise HTTPException(status_code=401, detail="Login pengguna diperlukan")
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        require_csrf(request)
+    else:
+        csrf_token(request)
+    user = db.get(ClientUser, user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Login pengguna diperlukan")
+    return user.id
 
 
 def _token_hash(token: str) -> str:
@@ -74,6 +93,101 @@ def _managed_worker_online(db: Session, now: datetime | None = None) -> bool:
     return (now or utc_now()) - seen_at <= MANAGED_WORKER_ONLINE_MAX_AGE
 
 
+@router.get("/servers")
+def search_broker_servers(
+    response: Response,
+    q: str = "",
+    _owner_id: int = Depends(require_client_id),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "private, no-store"
+    if not 3 <= len(q.strip()) <= 96:
+        return {"servers": []}
+    try:
+        return {"servers": search_mt5_servers(q)}
+    except BrokerDirectoryError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Pencarian direktori broker gagal. Coba lagi sebentar.",
+        ) from exc
+
+
+@router.post("/prepayment-checks", status_code=202)
+def create_prepayment_mt5_check(
+    payload: PrepaymentMT5CheckRequest,
+    owner_id: int = Depends(require_client_id),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    label = payload.label.strip()
+    server = payload.server.strip()
+    login = payload.login.strip()
+    if not label or not server or not login:
+        raise HTTPException(status_code=422, detail="Nama akun, server, dan nomor login wajib diisi")
+    if not _managed_worker_online(db):
+        raise HTTPException(
+            status_code=409,
+            detail="Pemeriksaan login MT5 belum tersedia. Pastikan worker copier online lalu coba lagi.",
+        )
+
+    now = utc_now()
+    db.execute(delete(PendingMT5Verification).where(
+        PendingMT5Verification.expires_at < now,
+        PendingMT5Verification.status != "ORDERED",
+    ))
+    check = PendingMT5Verification(
+        id=secrets.token_urlsafe(24),
+        owner_id=owner_id,
+        label=label,
+        server=server,
+        login=login,
+        plan=payload.plan,
+        execution_mode=payload.execution_mode,
+        password_ciphertext=encrypt_managed_copy_password(payload.broker_password),
+        status="CHECKING",
+        message="Login MT5 sedang diperiksa. Pemeriksaan ini tidak mengirim order.",
+        created_at=now,
+        expires_at=now + timedelta(minutes=30),
+    )
+    db.add(check)
+    db.commit()
+    return {"check_id": check.id, "status": check.status, "message": check.message or ""}
+
+
+@router.get("/prepayment-checks/{check_id}")
+def get_prepayment_mt5_check(
+    check_id: str,
+    response: Response,
+    owner_id: int = Depends(require_client_id),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "private, no-store"
+    check = db.get(PendingMT5Verification, check_id)
+    if check is None or check.owner_id != owner_id:
+        raise HTTPException(status_code=404, detail="Sesi pemeriksaan login tidak ditemukan")
+    if check.status in {"CHECKING", "VALID"} and _aware(check.expires_at) <= utc_now():
+        check.status = "EXPIRED"
+        check.message = "Sesi pemeriksaan berakhir. Silakan periksa login MT5 kembali."
+        check.password_ciphertext = ""
+        db.commit()
+    session_fresh = bool(
+        check.session_observed_at
+        and utc_now() - _aware(check.session_observed_at) <= timedelta(seconds=12)
+    )
+    return {
+        "check_id": check.id,
+        "status": check.status,
+        "message": check.message,
+        "session_connected": bool(check.session_connected and session_fresh),
+        "balance": check.balance,
+        "equity": check.equity,
+        "floating_profit": check.floating_profit,
+        "currency": check.currency,
+        "account_trade_allowed": check.account_trade_allowed,
+        "terminal_trade_allowed": check.terminal_trade_allowed,
+        "expert_trade_allowed": check.expert_trade_allowed,
+        "session_observed_at": wib_iso(check.session_observed_at),
+    }
+
+
 def _account_payload(
     account: MT5Account,
     master_online: bool = False,
@@ -93,6 +207,23 @@ def _account_payload(
         connection_status = "disabled"
     elif not follower_online or not state_online:
         connection_status = "offline"
+    elif account.execution_mode == "MANAGED":
+        # Managed followers use order_send through MetaTrader5's Python API;
+        # EA terminal permissions are not prerequisites for that execution mode.
+        python_permissions_missing = (
+            state.account_trade_allowed is False
+            or state.python_api_trade_allowed is False
+            or (
+                state.python_api_trade_allowed is None
+                and (not state.terminal_trade_allowed or not state.expert_trade_allowed)
+            )
+        )
+        if python_permissions_missing:
+            connection_status = "trading_disabled"
+        elif not master_online:
+            connection_status = "waiting_for_source"
+        else:
+            connection_status = "ready"
     elif not state.terminal_trade_allowed or not state.expert_trade_allowed:
         connection_status = "trading_disabled"
     elif not master_online:
@@ -114,6 +245,9 @@ def _account_payload(
         "equity": state.equity if state else None,
         "floating_profit": state.floating_profit if state else None,
         "currency": state.currency if state else None,
+        "account_trade_allowed": state.account_trade_allowed if state else None,
+        "python_api_trade_allowed": state.python_api_trade_allowed if state else None,
+        "copy_error": state.copy_error if state else None,
         "trade_mode": state.trade_mode if state else None,
         "state_updated_at": wib_iso(state.observed_at) if state else None,
         "created_at": wib_iso(account.created_at),
@@ -132,20 +266,6 @@ def _owned_account(db: Session, owner_id: int, account_id: int) -> MT5Account:
 def _clear_account_history(db: Session, account_id: int) -> None:
     db.execute(delete(MT5HistoryDeal).where(MT5HistoryDeal.account_id == account_id))
     db.execute(delete(MT5AccountState).where(MT5AccountState.account_id == account_id))
-
-
-def require_client_id(request: Request, db: Session = Depends(get_db)) -> int:
-    user_id = request.session.get("client_user_id")
-    if not isinstance(user_id, int):
-        raise HTTPException(status_code=401, detail="Login pengguna diperlukan")
-    if request.method not in {"GET", "HEAD", "OPTIONS"}:
-        require_csrf(request)
-    else:
-        csrf_token(request)
-    user = db.get(ClientUser, user_id)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Login pengguna diperlukan")
-    return user.id
 
 
 def _account_from_token(
@@ -189,25 +309,25 @@ def _managed_copy_payload(profile: ManagedCopyProfile | None) -> dict[str, objec
     if profile is None:
         return {"configured": False, "active": False, "status": "SETUP_REQUIRED"}
     status = profile.status
-    if profile.active:
+    if status in {"STARTING", "STANDBY", "RUNNING"}:
         active_reference = profile.last_seen_at or profile.updated_at
         if utc_now() - _aware(active_reference) > FOLLOWER_ONLINE_MAX_AGE:
             status = "OFFLINE"
     return {
         "configured": True,
+        "active": profile.active,
         "login_status": profile.login_status,
         "login_message": profile.login_message,
         "follower_symbol": profile.follower_symbol,
-        "active": profile.active,
         "status": status,
         "status_message": profile.status_message,
         "last_seen_at": wib_iso(profile.last_seen_at),
         "mode_lot": profile.mode_lot,
         "ratio_lot": profile.ratio_lot,
         "lot_tetap": profile.lot_tetap,
-        "max_lot_per_order": profile.max_lot_per_order,
-        "max_lot_total": profile.max_lot_total,
-        "max_open_positions": profile.max_open_positions,
+        "max_lot_per_order": 0,
+        "max_lot_total": 0,
+        "max_open_positions": 0,
     }
 
 
@@ -224,22 +344,32 @@ def configure_managed_copy(
     profile = db.get(ManagedCopyProfile, account.id)
     if profile is not None and profile.active:
         raise HTTPException(status_code=409, detail="Jeda copy trading sebelum mengubah pengaturan akun")
+    if profile is None and not payload.broker_password:
+        raise HTTPException(status_code=422, detail="Password trading broker diperlukan untuk menghubungkan akun pertama kali")
     values = payload.model_dump(exclude={"broker_password"})
     if profile is None:
         profile = ManagedCopyProfile(
             account_id=account.id,
             password_ciphertext=encrypt_managed_copy_password(payload.broker_password),
+            login_status="CHECKING",
+            login_message="Memeriksa login dan koneksi akun MT5.",
+            status="STARTING",
             **values,
         )
         db.add(profile)
     else:
-        profile.password_ciphertext = encrypt_managed_copy_password(payload.broker_password)
         for key, value in values.items():
             setattr(profile, key, value)
-        profile.status = "PAUSED"
-        profile.status_message = None
-    profile.login_status = "CHECKING"
-    profile.login_message = "Memeriksa login dan kesiapan terminal MT5."
+        if payload.broker_password:
+            profile.password_ciphertext = encrypt_managed_copy_password(payload.broker_password)
+            profile.prepayment_check_id = None
+            profile.login_status = "CHECKING"
+            profile.login_message = "Memeriksa login dan koneksi akun MT5."
+            profile.status = "STARTING"
+            profile.status_message = None
+        elif profile.login_status == "VALID":
+            profile.status = "STANDBY"
+            profile.status_message = "Copy trading off. Terminal tetap tersambung dan saldo disinkronkan."
     profile.active = False
     profile.updated_at = utc_now()
     db.commit()
@@ -266,8 +396,8 @@ def set_managed_copy_active(
     if payload.active and not payload.acknowledge_live_risk:
         raise HTTPException(status_code=422, detail="Konfirmasi risiko diperlukan untuk mulai menyalin")
     profile.active = payload.active
-    profile.status = "STARTING" if payload.active else "PAUSED"
-    profile.status_message = None
+    profile.status = "STARTING" if payload.active else "STANDBY"
+    profile.status_message = None if payload.active else "Copy trading off. Terminal tetap tersambung dan menunggu tombol Mulai."
     if not payload.active:
         profile.last_seen_at = None
     profile.updated_at = utc_now()
@@ -293,11 +423,25 @@ def list_managed_copy_jobs(
 ) -> dict[str, object]:
     _require_copier_worker(x_copier_worker_key)
     response.headers["Cache-Control"] = "no-store"
+    now = utc_now()
+    expired_checks = db.execute(
+        select(PendingMT5Verification).where(
+            PendingMT5Verification.status.in_(("CHECKING", "VALID")),
+            PendingMT5Verification.expires_at <= now,
+        )
+    ).scalars().all()
+    for check in expired_checks:
+        check.status = "EXPIRED"
+        check.message = "Sesi pemeriksaan berakhir. Silakan periksa login MT5 kembali."
+        check.password_ciphertext = ""
     db.merge(AppSetting(key="managed_copy_worker_seen_at", value=utc_now().isoformat()))
     rows = db.execute(
         select(ManagedCopyProfile, MT5Account)
         .join(MT5Account, MT5Account.id == ManagedCopyProfile.account_id)
-        .where(ManagedCopyProfile.active.is_(True), MT5Account.execution_mode == "MANAGED")
+        .where(
+            ManagedCopyProfile.login_status == "VALID",
+            MT5Account.execution_mode == "MANAGED",
+        )
         .order_by(MT5Account.id.asc())
     ).all()
     jobs = []
@@ -315,13 +459,15 @@ def list_managed_copy_jobs(
             "login": account.login,
             "server": account.server,
             "broker_password": password,
+            "active": profile.active,
+            "prepayment_check_id": profile.prepayment_check_id,
             "follower_symbol": profile.follower_symbol,
             "mode_lot": profile.mode_lot,
             "ratio_lot": profile.ratio_lot,
             "lot_tetap": profile.lot_tetap,
-            "max_lot_per_order": profile.max_lot_per_order,
-            "max_lot_total": profile.max_lot_total,
-            "max_open_positions": profile.max_open_positions,
+            "max_lot_per_order": 0,
+            "max_lot_total": 0,
+            "max_open_positions": 0,
         })
     login_checks = []
     check_rows = db.execute(
@@ -347,11 +493,65 @@ def list_managed_copy_jobs(
             "server": account.server,
             "broker_password": password,
         })
+    prepayment_checks = []
+    pending_rows = db.execute(
+        select(PendingMT5Verification)
+        .where(
+            or_(
+                PendingMT5Verification.status == "CHECKING",
+                and_(
+                    PendingMT5Verification.execution_mode == "MANAGED",
+                    PendingMT5Verification.status.in_(("VALID", "ORDERED")),
+                ),
+            ),
+            or_(
+                PendingMT5Verification.status == "ORDERED",
+                PendingMT5Verification.expires_at > utc_now(),
+            ),
+        )
+        .order_by(PendingMT5Verification.created_at.asc())
+        .limit(20)
+    ).scalars().all()
+    for check in pending_rows:
+        password = ""
+        if check.execution_mode == "MANAGED" or check.status == "CHECKING":
+            try:
+                password = decrypt_managed_copy_password(check.password_ciphertext)
+            except Exception:
+                check.status = "INVALID"
+                check.message = "Kredensial tidak dapat dibuka. Masukkan ulang password broker."
+                check.password_ciphertext = ""
+                logger.exception("Gagal membuka kredensial untuk pemeriksaan prabayar %s", check.id)
+                continue
+        prepayment_checks.append({
+            "check_id": check.id,
+            "login": check.login,
+            "server": check.server,
+            "status": check.status,
+            "execution_mode": check.execution_mode,
+            "broker_password": password,
+        })
     managed_ids = list(db.execute(
         select(MT5Account.id).where(MT5Account.execution_mode == "MANAGED")
     ).scalars())
     db.commit()
-    return {"jobs": jobs, "login_checks": login_checks, "managed_account_ids": managed_ids}
+    return {
+        "jobs": jobs,
+        "login_checks": login_checks,
+        "prepayment_checks": prepayment_checks,
+        "managed_account_ids": managed_ids,
+    }
+
+
+@router.post("/copier/heartbeat")
+def managed_copy_worker_heartbeat(
+    x_copier_worker_key: str | None = Header(default=None, alias="X-Copier-Worker-Key"),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    _require_copier_worker(x_copier_worker_key)
+    db.merge(AppSetting(key="managed_copy_worker_seen_at", value=utc_now().isoformat()))
+    db.commit()
+    return {"status": "ok"}
 
 
 @router.post("/copier/jobs/{account_id}/login-check")
@@ -371,6 +571,66 @@ def report_managed_copy_login_check(
     profile.login_message = payload.message
     db.commit()
     return {"status": profile.login_status}
+
+
+@router.post("/copier/prepayment-checks/{check_id}/result")
+def report_prepayment_mt5_check(
+    check_id: str,
+    payload: ManagedCopyLoginCheckResult,
+    x_copier_worker_key: str | None = Header(default=None, alias="X-Copier-Worker-Key"),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    _require_copier_worker(x_copier_worker_key)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", check_id):
+        raise HTTPException(status_code=404, detail="Sesi pemeriksaan login tidak ditemukan")
+    check = db.get(PendingMT5Verification, check_id)
+    if check is None:
+        raise HTTPException(status_code=404, detail="Sesi pemeriksaan login tidak ditemukan")
+    if check.status != "CHECKING":
+        return {"status": check.status}
+    if _aware(check.expires_at) <= utc_now():
+        check.status = "EXPIRED"
+        check.message = "Sesi pemeriksaan berakhir. Silakan periksa login MT5 kembali."
+        check.password_ciphertext = ""
+    else:
+        check.status = "VALID" if payload.valid else "INVALID"
+        check.message = payload.message
+        if not payload.valid or check.execution_mode == "EA":
+            check.password_ciphertext = ""
+    db.commit()
+    return {"status": check.status}
+
+
+@router.post("/copier/prepayment-checks/{check_id}/session")
+def report_prepayment_mt5_session(
+    check_id: str,
+    payload: PrepaymentMT5SessionReport,
+    x_copier_worker_key: str | None = Header(default=None, alias="X-Copier-Worker-Key"),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    _require_copier_worker(x_copier_worker_key)
+    check = db.get(PendingMT5Verification, check_id)
+    if check is None or check.status not in {"VALID", "ORDERED"}:
+        raise HTTPException(status_code=404, detail="Sesi MT5 aktif tidak ditemukan")
+    check.session_connected = payload.connected
+    check.session_observed_at = utc_now()
+    if payload.balance is not None:
+        check.balance = payload.balance
+    if payload.equity is not None:
+        check.equity = payload.equity
+    if payload.floating_profit is not None:
+        check.floating_profit = payload.floating_profit
+    if payload.currency is not None:
+        check.currency = payload.currency.upper()
+    if payload.account_trade_allowed is not None:
+        check.account_trade_allowed = payload.account_trade_allowed
+    if payload.terminal_trade_allowed is not None:
+        check.terminal_trade_allowed = payload.terminal_trade_allowed
+    if payload.expert_trade_allowed is not None:
+        check.expert_trade_allowed = payload.expert_trade_allowed
+    check.message = payload.message
+    db.commit()
+    return {"status": "ok"}
 
 
 @router.get("/copier/status")
@@ -411,9 +671,14 @@ def report_managed_copy_worker_status(
     profile = db.get(ManagedCopyProfile, account_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Job copy tidak ditemukan")
-    profile.status = "PAUSED" if payload.status == "STOPPED" and not profile.active else payload.status
-    profile.status_message = None if profile.status == "PAUSED" else payload.message
-    if payload.status == "RUNNING":
+    profile.status = "STANDBY" if payload.status == "STOPPED" and not profile.active else payload.status
+    if profile.status in {"PAUSED", "STANDBY"} and payload.message is None:
+        profile.status_message = None
+    elif payload.message is not None:
+        profile.status_message = payload.message
+    elif profile.status != "RUNNING":
+        profile.status_message = None
+    if payload.status in {"RUNNING", "STANDBY"}:
         profile.login_status = "VALID"
         profile.login_message = "Login broker berhasil dan terminal siap untuk copy trading."
     profile.last_seen_at = utc_now()
@@ -503,6 +768,10 @@ def delete_account(
     profile = db.get(ManagedCopyProfile, account.id) if account.execution_mode == "MANAGED" else None
     if profile is not None and profile.active:
         raise HTTPException(status_code=409, detail="Jeda copy trading sebelum menghapus akun")
+    if profile is not None and profile.prepayment_check_id:
+        linked_check = db.get(PendingMT5Verification, profile.prepayment_check_id)
+        if linked_check is not None:
+            db.delete(linked_check)
     _clear_account_history(db, account_id)
     db.delete(account)
     db.commit()
@@ -537,10 +806,21 @@ def _store_follower_account_report(
     state.currency = payload.currency.upper()
     state.trade_mode = payload.trade_mode
     state.allow_live_trading = payload.allow_live_trading
+    if payload.account_trade_allowed is not None:
+        state.account_trade_allowed = payload.account_trade_allowed
+    if payload.python_api_trade_allowed is not None:
+        state.python_api_trade_allowed = payload.python_api_trade_allowed
     state.terminal_trade_allowed = payload.terminal_trade_allowed
     state.expert_trade_allowed = payload.expert_trade_allowed
+    state.copy_error = (payload.copy_error or "").strip() or None
     state.open_position_ids_json = json.dumps(sorted(set(payload.open_position_ids)))
     state.observed_at = now
+
+    if account.execution_mode == "MANAGED":
+        profile = db.get(ManagedCopyProfile, account.id)
+        if profile is not None:
+            if state.copy_error is not None or profile.status == "RUNNING":
+                profile.status_message = state.copy_error
 
     tickets = [deal.deal_ticket for deal in payload.deals]
     existing = {}
@@ -600,8 +880,6 @@ def report_managed_copy_account(
     account = db.get(MT5Account, account_id)
     if profile is None or account is None or account.execution_mode != "MANAGED":
         raise HTTPException(status_code=404, detail="Akun managed copy tidak ditemukan")
-    if not profile.active:
-        raise HTTPException(status_code=409, detail="Copy trading akun ini sedang dijeda")
     return _store_follower_account_report(account, payload, db)
 
 

@@ -1,0 +1,9 @@
+{
+  "api_base_url": "http://127.0.0.1:8000",
+  "worker_api_key_env": "COPIER_WORKER_API_KEY",
+  "master_config": "master.json",
+  "terminal_template_dir": "C:/Path/To/Clean/MT5FollowerTemplate",
+  "runtime_dir": "runtime",
+  "poll_seconds": 5,
+  "heartbeat_timeout_seconds": 45
+}

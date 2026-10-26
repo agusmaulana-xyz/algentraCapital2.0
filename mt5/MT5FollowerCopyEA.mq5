@@ -1,10 +1,10 @@
 #property strict
-#property version   "1.101"
+#property version   "1.103"
 #property description "Copies all published Algentra positions and reports MT5 account history"
 
 #include <Trade/Trade.mqh>
 
-input string ServerURL = "https://algentracapital.my.id";
+input string ServerURL = "http://127.0.0.1:8000";
 input string AccountToken = "";
 input int PollIntervalMs = 1000;
 input long MagicNumber = 26100301;
@@ -17,6 +17,7 @@ input string SymbolMapCsv = ""; // Optional source-to-broker mapping, e.g. XAUUS
 CTrade g_trade;
 string g_connection_status = "starting";
 string g_account_report_status = "waiting for MT5 report";
+string g_last_copy_error = "";
 datetime g_last_log = 0;
 datetime g_last_report_attempt = 0;
 long g_history_cursor = 0;
@@ -384,8 +385,9 @@ void ReportAccountState()
       return;
      }
    string currency = JsonEscape(AccountInfoString(ACCOUNT_CURRENCY));
+   string copy_error = JsonEscape(g_last_copy_error);
    string payload = StringFormat(
-      "{\"balance\":%s,\"equity\":%s,\"floating_profit\":%s,\"margin\":%s,\"free_margin\":%s,\"currency\":\"%s\",\"trade_mode\":\"%s\",\"allow_live_trading\":%s,\"terminal_trade_allowed\":%s,\"expert_trade_allowed\":%s,\"open_position_ids\":%s,\"deals\":%s}",
+      "{\"balance\":%s,\"equity\":%s,\"floating_profit\":%s,\"margin\":%s,\"free_margin\":%s,\"currency\":\"%s\",\"trade_mode\":\"%s\",\"allow_live_trading\":%s,\"terminal_trade_allowed\":%s,\"expert_trade_allowed\":%s,\"open_position_ids\":%s,\"deals\":%s,\"copy_error\":\"%s\"}",
       DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 8),
       DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 8),
       DoubleToString(AccountInfoDouble(ACCOUNT_PROFIT), 8),
@@ -395,7 +397,7 @@ void ReportAccountState()
       "true",
       (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) ? "true" : "false",
       (MQLInfoInteger(MQL_TRADE_ALLOWED) && AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) ? "true" : "false",
-      CurrentOpenPositionIds(), deals_json);
+      CurrentOpenPositionIds(), deals_json, copy_error);
    string response;
    PostAccountReport(payload, response);
   }
@@ -431,6 +433,16 @@ int VolumePrecision(const double step)
    return 8;
   }
 
+string MinimumLotFallbackKey(const string source_ticket)
+  {
+   return "ACMFB_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + source_ticket;
+  }
+
+bool MinimumLotFallbackUsed(const string source_ticket)
+  {
+   return GlobalVariableCheck(MinimumLotFallbackKey(source_ticket));
+  }
+
 double NormalizeLots(const string symbol, const double requested)
   {
    double minimum = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
@@ -443,6 +455,14 @@ double NormalizeLots(const string symbol, const double requested)
    if(lots > maximum + step * 0.000001)
       lots -= step;
    return NormalizeDouble(lots, VolumePrecision(step));
+  }
+
+double MinimumBrokerLots(const string symbol)
+  {
+   double minimum = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   if(minimum <= 0.0)
+      return 0.0;
+   return NormalizeLots(symbol, minimum);
   }
 
 int CountManagedPositions()
@@ -472,14 +492,17 @@ void CloseMissingCopies(string &source_tickets[])
       string source_ticket = StringSubstr(comment, 4);
       if(IsSourceTicket(source_ticket, source_tickets)) continue;
       if(g_trade.PositionClose(local_ticket, MaxSlippagePoints))
+        {
+         GlobalVariableDel(MinimumLotFallbackKey(source_ticket));
          Print("[MT5FollowerCopyEA] source position ", source_ticket, " closed; Copy Trading position ", local_ticket, " closed");
+        }
       else
          Print("[MT5FollowerCopyEA] failed to close Copy Trading position ", local_ticket, ": ", g_trade.ResultRetcodeDescription());
      }
   }
 
 bool OpenCopy(const string source_ticket, const string symbol, const string action,
-              const double lots, const double sl, const double tp)
+              const double lots, const double sl, const double tp, const bool allow_minimum_fallback)
   {
    MqlTick quote;
    if(!SymbolSelect(symbol, true) || !SymbolInfoTick(symbol, quote)) return false;
@@ -487,12 +510,42 @@ bool OpenCopy(const string source_ticket, const string symbol, const string acti
    bool sent = action == "BUY"
                ? g_trade.Buy(lots, symbol, 0.0, sl, tp, Marker(source_ticket))
                : g_trade.Sell(lots, symbol, 0.0, sl, tp, Marker(source_ticket));
-   if(!sent || (g_trade.ResultRetcode() != TRADE_RETCODE_DONE && g_trade.ResultRetcode() != TRADE_RETCODE_DONE_PARTIAL))
+   uint retcode = g_trade.ResultRetcode();
+   bool executed = sent && (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_DONE_PARTIAL);
+   double executed_lots = lots;
+   double minimum_lots = MinimumBrokerLots(symbol);
+   if(!executed && allow_minimum_fallback && !MinimumLotFallbackUsed(source_ticket) &&
+      retcode == TRADE_RETCODE_NO_MONEY && minimum_lots > 0.0 &&
+      lots > minimum_lots + SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP) * 0.000001)
      {
-      Print("[MT5FollowerCopyEA] copy open failed for source ", source_ticket, ": ", g_trade.ResultRetcodeDescription());
+      Print("[MT5FollowerCopyEA] broker menolak lot ", DoubleToString(lots, 2),
+            " karena margin; mencoba lot minimum ", DoubleToString(minimum_lots, 2), " pada ", symbol);
+      sent = action == "BUY"
+             ? g_trade.Buy(minimum_lots, symbol, 0.0, sl, tp, Marker(source_ticket))
+             : g_trade.Sell(minimum_lots, symbol, 0.0, sl, tp, Marker(source_ticket));
+      retcode = g_trade.ResultRetcode();
+      executed = sent && (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_DONE_PARTIAL);
+      if(executed)
+        {
+         executed_lots = minimum_lots;
+         GlobalVariableSet(MinimumLotFallbackKey(source_ticket), (double)TimeCurrent());
+        }
+     }
+   if(!executed)
+     {
+      if(retcode == TRADE_RETCODE_NO_MONEY)
+         g_last_copy_error = "Copy Trading gagal karena akun tidak memiliki saldo yang cukup. Silakan isi ulang saldo terlebih dahulu.";
+      else if(retcode == TRADE_RETCODE_TRADE_DISABLED || retcode == TRADE_RETCODE_CLIENT_DISABLES_AT ||
+              retcode == TRADE_RETCODE_SERVER_DISABLES_AT)
+         g_last_copy_error = "Copy Trading gagal karena broker atau akun menolak izin trading. Periksa password trading dan izin Algo Trading.";
+      else
+         g_last_copy_error = "";
+      Print("[MT5FollowerCopyEA] copy open failed for source ", source_ticket, ": ",
+            g_last_copy_error == "" ? g_trade.ResultRetcodeDescription() : g_last_copy_error);
       return false;
      }
-   Print("[MT5FollowerCopyEA] copied ", action, " ", DoubleToString(lots, 2), " ", symbol,
+   g_last_copy_error = "";
+   Print("[MT5FollowerCopyEA] copied ", action, " ", DoubleToString(executed_lots, 2), " ", symbol,
          " from source ", source_ticket);
    return true;
   }
@@ -503,7 +556,19 @@ void ReconcileVolumeAndStops(const string source_ticket, const string symbol, co
    ulong local_tickets[];
    double current_volume = 0.0;
    FindCopiedPositions(source_ticket, local_tickets, current_volume);
-   double target_volume = NormalizeLots(symbol, requested_lots * VolumeMultiplier);
+   double requested_volume = requested_lots * VolumeMultiplier;
+   double target_volume = NormalizeLots(symbol, requested_volume);
+   double minimum_lots = MinimumBrokerLots(symbol);
+   bool minimum_lot_target = false;
+   if(MinimumLotFallbackUsed(source_ticket))
+      target_volume = minimum_lots;
+   else if(target_volume <= 0.0 && requested_volume > 0.0 && minimum_lots > 0.0)
+     {
+      target_volume = minimum_lots;
+      minimum_lot_target = true;
+      Print("[MT5FollowerCopyEA] source ", source_ticket, " lot di bawah minimum broker; mencoba lot ",
+            DoubleToString(minimum_lots, 2), " pada ", symbol);
+     }
    if(target_volume <= 0.0)
      {
       Print("[MT5FollowerCopyEA] source ", source_ticket, " skipped: Copy Trading lot is outside broker limits");
@@ -514,7 +579,9 @@ void ReconcileVolumeAndStops(const string source_ticket, const string symbol, co
 
    if(ArraySize(local_tickets) == 0)
      {
-      OpenCopy(source_ticket, symbol, action, target_volume, sl, tp);
+      bool opened = OpenCopy(source_ticket, symbol, action, target_volume, sl, tp, true);
+      if(opened && minimum_lot_target)
+         GlobalVariableSet(MinimumLotFallbackKey(source_ticket), (double)TimeCurrent());
       return;
      }
 
@@ -560,7 +627,7 @@ void ReconcileVolumeAndStops(const string source_ticket, const string symbol, co
    else if(target_volume > current_volume + tolerance)
      {
       double extra = NormalizeLots(symbol, target_volume - current_volume);
-      if(extra > 0.0) OpenCopy(source_ticket, symbol, action, extra, sl, tp);
+      if(extra > 0.0) OpenCopy(source_ticket, symbol, action, extra, sl, tp, false);
      }
   }
 
@@ -694,5 +761,6 @@ void OnTimer()
            "\nManaged positions: ", CountManagedPositions(),
            "\nSaldo: ", AccountInfoString(ACCOUNT_CURRENCY), " ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
            "\nCopying permission: ON",
+           "\nStatus order: ", g_last_copy_error == "" ? "normal" : g_last_copy_error,
            "\nLaporan akun: ", g_account_report_status);
   }

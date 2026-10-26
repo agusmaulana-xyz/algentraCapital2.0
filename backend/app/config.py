@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -54,6 +55,9 @@ class Settings(BaseSettings):
     contact_youtube: str | None = Field(default=None, validation_alias="CONTACT_YOUTUBE")
     contact_tiktok: str | None = Field(default=None, validation_alias="CONTACT_TIKTOK")
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    airpay_base_url: str | None = Field(default=None, validation_alias="AIRPAY_BASE_URL")
+    airpay_api_key: SecretStr | None = Field(default=None, validation_alias="AIRPAY_API_KEY")
+    airpay_merchant_uid: str | None = Field(default=None, validation_alias="AIRPAY_MERCHANT_UID")
 
     @model_validator(mode="after")
     def validate_credentials(self) -> "Settings":
@@ -79,6 +83,22 @@ class Settings(BaseSettings):
             raise ValueError("GEMINI_MODEL cannot be empty")
         if not self.gemini_cs_model.strip():
             raise ValueError("GEMINI_CS_MODEL cannot be empty")
+        if self.airpay_base_url:
+            parsed_airpay_url = urlsplit(self.airpay_base_url.strip())
+            if (
+                parsed_airpay_url.scheme not in {"https", "http"}
+                or not parsed_airpay_url.hostname
+                or parsed_airpay_url.username
+                or parsed_airpay_url.password
+                or parsed_airpay_url.path not in {"", "/"}
+                or parsed_airpay_url.query
+                or parsed_airpay_url.fragment
+                or (
+                    parsed_airpay_url.scheme != "https"
+                    and parsed_airpay_url.hostname.casefold() not in {"localhost", "127.0.0.1", "::1"}
+                )
+            ):
+                raise ValueError("AIRPAY_BASE_URL harus HTTPS atau HTTP localhost tanpa kredensial/path query")
         if (self.telegram_api_id is None) != (self.telegram_api_hash is None):
             raise ValueError("TELEGRAM_API_ID dan TELEGRAM_API_HASH harus diisi bersamaan")
         if (self.telegram_bot_token is None) != (self.telegram_admin_chat_id is None):
@@ -113,6 +133,15 @@ class Settings(BaseSettings):
     @property
     def email_configured(self) -> bool:
         return all((self.email_smtp_host, self.email_smtp_username, self.email_smtp_password, self.email_from))
+
+    @property
+    def airpay_configured(self) -> bool:
+        api_key = self.airpay_api_key.get_secret_value().strip() if self.airpay_api_key else ""
+        return bool(
+            self.airpay_base_url
+            and api_key
+            and api_key.casefold() != "qp-key-your_secret_key"
+        )
 
     @property
     def resolved_database_url(self) -> str:
