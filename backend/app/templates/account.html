@@ -138,6 +138,7 @@ let prepaymentSessionTimer = null;
 let prepaymentCheckInProgress = false;
 let pendingPrepaymentRequestId = null;
 let pendingPrepaymentRequestStartedAt = 0;
+let prepaymentCleanupPending = Promise.resolve();
 
 const accountLoginInput = document.querySelector('#account-form [name="login"]');
 accountLoginInput.addEventListener("input", () => {
@@ -156,6 +157,7 @@ let brokerSearchRun = 0;
 
 function invalidatePrepaymentCheck() {
   const wasChecking = prepaymentCheckInProgress;
+  const staleCheckId = prepaymentCheckId || pendingPrepaymentRequestId;
   prepaymentCheckRun += 1;
   prepaymentCheckInProgress = false;
   prepaymentCheckId = null;
@@ -166,6 +168,10 @@ function invalidatePrepaymentCheck() {
   prepaymentSessionTimer = null;
   brokerPasswordInput.required = true;
   continuePaymentButton.disabled = true;
+  if (staleCheckId) {
+    prepaymentCleanupPending = api(`/api/mt5/prepayment-checks/${encodeURIComponent(staleCheckId)}`, {method:"DELETE"})
+      .catch(() => null);
+  }
   if (wasChecking) prepaymentCheckButton.disabled = !managedWorkerReady;
   if (wasChecking || !prepaymentCheckButton.disabled) statusBox.textContent = "Data akun berubah. Periksa koneksi MT5 kembali sebelum melanjutkan pembayaran.";
 }
@@ -265,6 +271,11 @@ prepaymentCheckButton.addEventListener("click", async () => {
     check_id: pendingPrepaymentRequestId,
   };
   try {
+    await prepaymentCleanupPending;
+    if (run !== prepaymentCheckRun) {
+      await api(`/api/mt5/prepayment-checks/${encodeURIComponent(payload.check_id)}`, {method:"DELETE"}).catch(() => null);
+      return;
+    }
     let check = null;
     for (let attempt = 0; attempt < 90; attempt += 1) {
       if (run !== prepaymentCheckRun) return;
@@ -273,9 +284,17 @@ prepaymentCheckButton.addEventListener("click", async () => {
         break;
       } catch (error) {
         if (!error.cloudflare502) throw error;
+        if (run !== prepaymentCheckRun) {
+          await api(`/api/mt5/prepayment-checks/${encodeURIComponent(payload.check_id)}`, {method:"DELETE"}).catch(() => null);
+          return;
+        }
         statusBox.textContent = "Pemeriksaan sedang berlangsung. Menunggu respons server VPS...";
         if (attempt < 89) await new Promise((resolve) => setTimeout(resolve, 2000));
       }
+    }
+    if (run !== prepaymentCheckRun && check) {
+      await api(`/api/mt5/prepayment-checks/${encodeURIComponent(check.check_id)}`, {method:"DELETE"}).catch(() => null);
+      return;
     }
     if (!check) {
       statusBox.textContent = "Pemeriksaan belum mendapat jawaban dari server. Klik periksa lagi untuk melanjutkan sesi yang sama.";

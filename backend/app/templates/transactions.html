@@ -9,7 +9,7 @@
   .transaction-card__top { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:8px; }
   .transaction-card__top h3 { margin-bottom:5px; }
   .transaction-badge { display:inline-flex; align-items:center; min-height:25px; padding:3px 9px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:10px; font-weight:800; }
-  .transaction-badge--pending_payment, .transaction-badge--payment_submitted { color:#ead18f; }
+  .transaction-badge--pending_payment, .transaction-badge--payment_submitted, .transaction-badge--cancel_requested { color:#ead18f; }
   .transaction-badge--approved { color:#83e3a8; }
   .transaction-badge--rejected, .transaction-badge--expired { color:#e8a2a2; }
   .transaction-details { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px 14px; margin:14px 0; }
@@ -51,6 +51,7 @@
           <option value="ALL">Semua transaksi</option>
           <option value="PENDING_PAYMENT">Menunggu pembayaran</option>
           <option value="PAYMENT_SUBMITTED">Sedang diproses</option>
+          <option value="CANCEL_REQUESTED">Pembatalan diproses</option>
           <option value="APPROVED">Transaksi diterima</option>
           <option value="REJECTED">Tidak valid</option>
           <option value="EXPIRED">Kedaluwarsa</option>
@@ -103,6 +104,7 @@ const money = (value) => `Rp ${Number(value || 0).toLocaleString("id-ID")}`;
 const statusNames = {
   PENDING_PAYMENT: "Menunggu pembayaran",
   PAYMENT_SUBMITTED: "Sedang diproses",
+  CANCEL_REQUESTED: "Pembatalan diproses",
   APPROVED: "Transaksi diterima",
   REJECTED: "Transaksi tidak valid",
   EXPIRED: "Tagihan kedaluwarsa",
@@ -222,6 +224,10 @@ function renderOrders(force = false) {
           } catch (error) { transactionMessage.textContent = error.message; retry.disabled = false; }
         }, true);
       }
+    } else if (order.status === "CANCEL_REQUESTED") {
+      const progress = document.createElement("p"); progress.className = "transaction-note";
+      progress.textContent = order.payment_message || "Pembatalan sedang menunggu konfirmasi AirPay. Jangan bayar QRIS ini.";
+      card.append(progress);
     } else if (order.status === "APPROVED") {
       const complete = document.createElement("p"); complete.className = "transaction-note";
       complete.textContent = order.execution_mode === "MANAGED"
@@ -237,18 +243,33 @@ function renderOrders(force = false) {
       const expired = document.createElement("p"); expired.className = "transaction-note";
       expired.textContent = order.payment_message || "Tagihan AirPay kedaluwarsa. Mulai kembali dari halaman akun untuk membuat pesanan baru.";
       card.append(expired);
+    } else if (order.status === "CANCELLED") {
+      const cancelled = document.createElement("p"); cancelled.className = "transaction-note";
+      cancelled.textContent = order.payment_message || "Pesanan dibatalkan.";
+      card.append(cancelled);
     }
 
-    if (
-      ["PENDING_PAYMENT", "PAYMENT_SUBMITTED"].includes(order.status)
-      && !(order.payment_provider === "AIRPAY" && (
-        order.has_qris || ["CREATING", "PENDING", "SUCCESS"].includes(order.airpay_status)
-      ))
-    ) {
-      addButton(actions, "Batalkan pesanan", async () => {
+    const airpayCanCancel = order.payment_provider === "AIRPAY"
+      && (["NOT_CREATED", "EXPIRED", "FAILED", "CANCELLED"].includes(order.airpay_status)
+        || (order.has_airpay_transaction && !["CREATING", "SUCCESS"].includes(order.airpay_status)));
+    const canCancelOrder = order.status === "EXPIRED"
+      || (order.status === "PENDING_PAYMENT" && (order.payment_provider !== "AIRPAY" || airpayCanCancel))
+      || (order.status === "PAYMENT_SUBMITTED" && order.payment_provider !== "AIRPAY");
+    if (canCancelOrder) {
+      const isAirpayRequest = order.payment_provider === "AIRPAY"
+        && order.status === "PENDING_PAYMENT"
+        && order.has_airpay_transaction
+        && !["EXPIRED", "FAILED", "CANCELLED", "SUCCESS"].includes(order.airpay_status);
+      addButton(actions, isAirpayRequest ? "Ajukan pembatalan" : "Batalkan pesanan", async () => {
+        const confirmation = isAirpayRequest
+          ? "AirPay belum menyediakan pembatalan langsung untuk invoice aktif. Terminal MT5 akan dibersihkan sekarang dan sistem menunggu invoice kedaluwarsa. Jangan bayar QR ini. Jika pembayaran telanjur masuk, akun tetap diproses agar dana tidak tertahan. Ajukan pembatalan?"
+          : "Batalkan pesanan ini? Terminal pemeriksaan MT5 yang terkait akan dihentikan dan dibersihkan.";
+        if (!confirm(confirmation)) return;
         try {
-          await api(`/api/payments/orders/${order.id}/cancel`, {method:"POST"});
-          transactionMessage.textContent = "Pesanan dibatalkan.";
+          const result = await api(`/api/payments/orders/${order.id}/cancel`, {method:"POST"});
+          transactionMessage.textContent = result.status === "CANCEL_REQUESTED"
+            ? "Pembatalan diminta. Terminal pemeriksaan sedang dibersihkan; jangan bayar QRIS ini."
+            : "Pesanan dibatalkan. Terminal pemeriksaan sedang dibersihkan oleh worker.";
           expandedPaymentOrderId = null; showProofFormForOrderId = null;
           await loadOrders(true);
         } catch (error) { transactionMessage.textContent = error.message; }
@@ -355,8 +376,8 @@ async function pollAirpayOrders() {
   if (pollingAirpayOrders || document.hidden) return;
   const pending = orders.filter((order) =>
     order.payment_provider === "AIRPAY"
-    && ["PENDING_PAYMENT", "PAYMENT_SUBMITTED"].includes(order.status)
-    && order.has_qris
+    && ["PENDING_PAYMENT", "PAYMENT_SUBMITTED", "CANCEL_REQUESTED"].includes(order.status)
+    && order.has_airpay_transaction
   );
   if (!pending.length) return;
   pollingAirpayOrders = true;

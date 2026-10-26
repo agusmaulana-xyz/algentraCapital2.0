@@ -159,7 +159,7 @@ def create_prepayment_mt5_check(
     now = utc_now()
     db.execute(delete(PendingMT5Verification).where(
         PendingMT5Verification.expires_at < now,
-        PendingMT5Verification.status != "ORDERED",
+        PendingMT5Verification.status.notin_(("ORDERED", "CANCEL_REQUESTED", "CANCELLED")),
     ))
     check = PendingMT5Verification(
         id=payload.check_id or secrets.token_urlsafe(24),
@@ -214,6 +214,34 @@ def get_prepayment_mt5_check(
         "expert_trade_allowed": check.expert_trade_allowed,
         "session_observed_at": wib_iso(check.session_observed_at),
     }
+
+
+@router.delete("/prepayment-checks/{check_id}")
+def cancel_prepayment_mt5_check(
+    check_id: str,
+    owner_id: int = Depends(require_client_id),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", check_id):
+        raise HTTPException(status_code=404, detail="Sesi pemeriksaan login tidak ditemukan")
+    db.execute(text("BEGIN IMMEDIATE"))
+    check = db.get(PendingMT5Verification, check_id)
+    if check is None or check.owner_id != owner_id:
+        db.rollback()
+        return {"status": "already_cancelled"}
+    if check.status in {"ORDERED", "CANCEL_REQUESTED"}:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Pemeriksaan ini sudah terhubung dengan pesanan. Batalkan pesanan untuk membersihkan terminal.")
+    if check.status != "CANCELLED":
+        check.status = "CANCELLED"
+        check.message = "Pemeriksaan dibatalkan. Worker akan menghentikan dan membersihkan terminal MT5."
+        check.password_ciphertext = ""
+        check.session_connected = False
+        check.session_observed_at = None
+        db.commit()
+    else:
+        db.commit()
+    return {"status": check.status}
 
 
 def _account_payload(
@@ -531,9 +559,12 @@ def list_managed_copy_jobs(
                     PendingMT5Verification.execution_mode == "MANAGED",
                     PendingMT5Verification.status.in_(("VALID", "ORDERED")),
                 ),
+                PendingMT5Verification.status.in_(("CANCEL_REQUESTED", "CANCELLED")),
             ),
             or_(
-                PendingMT5Verification.status == "ORDERED",
+                PendingMT5Verification.status.in_(
+                    ("ORDERED", "CANCEL_REQUESTED", "CANCELLED")
+                ),
                 PendingMT5Verification.expires_at > utc_now(),
             ),
         )
@@ -542,7 +573,9 @@ def list_managed_copy_jobs(
     ).scalars().all()
     for check in pending_rows:
         password = ""
-        if check.execution_mode == "MANAGED" or check.status == "CHECKING":
+        if check.status not in {"CANCEL_REQUESTED", "CANCELLED"} and (
+            check.execution_mode == "MANAGED" or check.status == "CHECKING"
+        ):
             try:
                 password = decrypt_managed_copy_password(check.password_ciphertext)
             except Exception:
@@ -627,6 +660,25 @@ def report_prepayment_mt5_check(
             check.password_ciphertext = ""
     db.commit()
     return {"status": check.status}
+
+
+@router.post("/copier/prepayment-checks/{check_id}/cleanup")
+def acknowledge_prepayment_terminal_cleanup(
+    check_id: str,
+    x_copier_worker_key: str | None = Header(default=None, alias="X-Copier-Worker-Key"),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    _require_copier_worker(x_copier_worker_key)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", check_id):
+        raise HTTPException(status_code=404, detail="Sesi pemeriksaan login tidak ditemukan")
+    check = db.get(PendingMT5Verification, check_id)
+    if check is None:
+        return {"status": "already_cleaned"}
+    if check.status != "CANCELLED":
+        raise HTTPException(status_code=409, detail="Sesi terminal belum berstatus dibatalkan")
+    db.delete(check)
+    db.commit()
+    return {"status": "cleaned"}
 
 
 @router.post("/copier/prepayment-checks/{check_id}/session")

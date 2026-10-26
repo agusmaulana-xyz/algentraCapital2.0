@@ -734,11 +734,33 @@ class ManagedWorker:
             # never overlap a follower's persistent MT5 terminal.
             terminal_key = "prepayment-" + hashlib.sha256(check_id.encode("ascii")).hexdigest()[:24]
             status = str(check.get("status", "CHECKING"))
-            if status in {"CHECKING", "VALID", "ORDERED"}:
-                live_session_keys.add(terminal_key)
             terminal_dir = (self.terminals_dir / terminal_key).resolve()
             if terminal_dir.parent != self.terminals_dir.resolve():
                 raise RuntimeError("Path terminal pemeriksaan prabayar berada di luar runtime worker")
+            if status in {"CANCEL_REQUESTED", "CANCELLED"}:
+                self.prepayment_retry_at.pop(check_id, None)
+                self.orphan_session_since.pop(terminal_key, None)
+                try:
+                    removed_terminal = terminal_dir.exists()
+                    if removed_terminal:
+                        stop_terminals_in(terminal_dir)
+                        remove_readonly_tree(terminal_dir)
+                    if status == "CANCELLED":
+                        self._request(
+                            f"/api/mt5/copier/prepayment-checks/{check_id}/cleanup",
+                            {},
+                        )
+                    if removed_terminal:
+                        logger.info("Terminal pemeriksaan prabayar %s dibersihkan setelah pembatalan", check_id[:12])
+                except (OSError, RuntimeError) as exc:
+                    logger.warning(
+                        "Terminal pemeriksaan prabayar %s belum dapat dibersihkan (%s); akan dicoba lagi",
+                        check_id[:12],
+                        type(exc).__name__,
+                    )
+                continue
+            if status in {"CHECKING", "VALID", "ORDERED"}:
+                live_session_keys.add(terminal_key)
             if status == "CHECKING":
                 keep_terminal = check.get("execution_mode") == "MANAGED"
                 try:

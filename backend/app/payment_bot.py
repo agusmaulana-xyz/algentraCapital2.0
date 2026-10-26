@@ -125,6 +125,15 @@ def review_payment_order(order_id: int, decision: str) -> tuple[str, int | None]
             ))
             check.status = "PROVISIONED"
             check.message = "Akun disetujui. Sesi MT5 tetap tersambung dalam mode standby."
+        elif order.prepayment_check_id:
+            check = db.get(PendingMT5Verification, order.prepayment_check_id)
+            if check is not None:
+                check.status = "CANCELLED"
+                check.message = "Akun EA disetujui. Terminal pemeriksaan sementara dibersihkan."
+                check.password_ciphertext = ""
+                check.session_connected = False
+                check.session_observed_at = None
+            order.prepayment_check_id = None
         order.account_id = account.id
         order.status = "APPROVED"
         order.updated_at = utc_now()

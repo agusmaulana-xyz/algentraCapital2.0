@@ -23,7 +23,7 @@ from ..time_utils import wib_iso
 
 logger = logging.getLogger("copytrade.payments")
 router = APIRouter(prefix="/api/payments", tags=["payments"])
-ACTIVE_ORDER_STATUSES = ("PENDING_PAYMENT", "PAYMENT_SUBMITTED")
+ACTIVE_ORDER_STATUSES = ("PENDING_PAYMENT", "PAYMENT_SUBMITTED", "CANCEL_REQUESTED")
 MAX_ACCOUNTS_PER_USER = 10
 
 
@@ -48,6 +48,7 @@ def _order_payload(order: PaymentOrder) -> dict[str, object]:
         "total_idr": order.total_idr,
         "payment_provider": order.payment_provider,
         "has_qris": bool(order.airpay_transaction_id and order.airpay_merchant_uid),
+        "has_airpay_transaction": bool(order.airpay_transaction_id),
         "airpay_status": order.airpay_status,
         "airpay_total_amount": order.airpay_total_amount,
         "airpay_unique_code": order.airpay_unique_code,
@@ -210,7 +211,7 @@ def create_payment_order(
         login=login,
         plan=payload.plan,
         execution_mode=payload.execution_mode,
-        prepayment_check_id=check.id if payload.execution_mode == "MANAGED" else None,
+        prepayment_check_id=check.id,
         total_idr=plan["price_idr"],
         payment_provider="AIRPAY",
         airpay_status="NOT_CREATED",
@@ -221,8 +222,13 @@ def create_payment_order(
     if payload.execution_mode == "MANAGED":
         check.status = "ORDERED"
     else:
-        # EA mode does not need to retain broker credentials after verification.
-        db.delete(check)
+        # EA mode does not retain the login session, but keep a cleanup tombstone
+        # so the worker can remove the temporary terminal folder immediately.
+        check.status = "CANCELLED"
+        check.message = "Pemeriksaan selesai. Worker akan membersihkan terminal sementara."
+        check.password_ciphertext = ""
+        check.session_connected = False
+        check.session_observed_at = None
     try:
         db.commit()
     except IntegrityError as exc:
@@ -245,6 +251,21 @@ def _store_airpay_invoice(order: PaymentOrder, invoice: AirPayInvoice) -> None:
     order.airpay_status = invoice.status
     order.payment_message = None
     order.updated_at = utc_now()
+
+
+def _queue_prepayment_terminal_cleanup(db: Session, order: PaymentOrder, *, retain_credentials: bool = False) -> None:
+    if not order.prepayment_check_id:
+        return
+    check = db.get(PendingMT5Verification, order.prepayment_check_id)
+    if check is not None:
+        check.status = "CANCEL_REQUESTED" if retain_credentials else "CANCELLED"
+        check.message = "Terminal pemeriksaan dihentikan atas permintaan pembatalan."
+        check.session_connected = False
+        check.session_observed_at = None
+        if not retain_credentials:
+            check.password_ciphertext = ""
+    if not retain_credentials:
+        order.prepayment_check_id = None
 
 
 @router.post("/orders/{order_id}/airpay")
@@ -371,7 +392,7 @@ async def check_airpay_order_status(
         if status != "APPROVED":
             logger.error("Provisioning akun setelah AirPay sukses tertunda untuk pesanan %s (status=%s)", order_id, status)
         return _order_payload(latest) if latest is not None else {"id": order_id, "status": status}
-    if order.status != "PENDING_PAYMENT" or not order.airpay_transaction_id:
+    if order.status not in {"PENDING_PAYMENT", "CANCEL_REQUESTED"} or not order.airpay_transaction_id:
         raise HTTPException(status_code=409, detail="Tagihan QRIS belum tersedia")
 
     transaction_id = order.airpay_transaction_id
@@ -432,26 +453,36 @@ async def check_airpay_order_status(
         db.rollback()
         raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
     should_provision = current.status == "PAYMENT_SUBMITTED" and current.airpay_status == "SUCCESS"
-    if current.status == "PENDING_PAYMENT":
+    if current.status in {"PENDING_PAYMENT", "CANCEL_REQUESTED"}:
+        cancellation_requested = current.status == "CANCEL_REQUESTED"
         current.airpay_status = airpay_status
         current.updated_at = utc_now()
         if airpay_status == "SUCCESS":
             current.status = "PAYMENT_SUBMITTED"
             current.airpay_paid_at = paid_at or utc_now()
-            current.payment_message = None
-            should_provision = True
-        elif terminal_status:
-            current.status = "EXPIRED"
-            current.payment_message = {
-                "EXPIRED": "Tagihan AirPay kedaluwarsa tanpa pembayaran.",
-                "FAILED": "AirPay menyatakan pembayaran gagal. Buat pesanan baru untuk mencoba kembali.",
-                "CANCELLED": "Tagihan AirPay dibatalkan tanpa pembayaran.",
-            }[airpay_status]
+            current.payment_message = (
+                "Pembayaran masuk sebelum AirPay menyelesaikan pembatalan; akun akan tetap diproses."
+                if cancellation_requested else None
+            )
             if current.prepayment_check_id:
                 check = db.get(PendingMT5Verification, current.prepayment_check_id)
-                if check is not None:
-                    db.delete(check)
-                current.prepayment_check_id = None
+                if check is not None and check.status == "CANCEL_REQUESTED":
+                    check.status = "ORDERED"
+                    check.message = "Pembayaran diterima; sesi MT5 dipulihkan untuk provisioning akun."
+            should_provision = True
+        elif terminal_status:
+            current.status = "CANCELLED" if cancellation_requested else "EXPIRED"
+            current.payment_message = (
+                "Tagihan AirPay berakhir dan pesanan berhasil dibatalkan."
+                if cancellation_requested else {
+                    "EXPIRED": "Tagihan AirPay kedaluwarsa tanpa pembayaran.",
+                    "FAILED": "AirPay menyatakan pembayaran gagal. Buat pesanan baru untuk mencoba kembali.",
+                    "CANCELLED": "Tagihan AirPay dibatalkan tanpa pembayaran.",
+                }[airpay_status]
+            )
+            _queue_prepayment_terminal_cleanup(db, current)
+        elif cancellation_requested:
+            current.payment_message = "Permintaan pembatalan menunggu konfirmasi AirPay. Jangan bayar QRIS ini."
         else:
             current.payment_message = None
     db.commit()
@@ -489,26 +520,39 @@ def cancel_payment_order(
     if order is None:
         db.rollback()
         raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
-    if order.status not in ACTIVE_ORDER_STATUSES:
+    if order.status == "CANCEL_REQUESTED":
+        result = _order_payload(order)
+        db.commit()
+        return result
+    if order.status not in (*ACTIVE_ORDER_STATUSES, "EXPIRED"):
         db.rollback()
         raise HTTPException(status_code=409, detail="Pesanan ini tidak bisa dibatalkan")
-    if order.payment_provider == "AIRPAY" and (
-        order.airpay_status in {"CREATING", "PENDING", "SUCCESS"}
-        or order.status == "PAYMENT_SUBMITTED"
-    ):
-        db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="Invoice QRIS AirPay yang aktif tidak dapat dibatalkan dari portal. Tunggu sampai kedaluwarsa.",
-        )
+    if order.payment_provider == "AIRPAY":
+        if order.status == "PAYMENT_SUBMITTED" or order.airpay_status == "SUCCESS":
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Pembayaran AirPay sudah berhasil dan sedang diproses; pesanan tidak dapat dibatalkan.")
+        if order.airpay_status == "CREATING":
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Tagihan AirPay sedang dibuat. Tunggu status tagihan diperbarui sebelum membatalkan.")
+        if order.airpay_status == "ERROR" and not order.airpay_transaction_id:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Status tagihan AirPay belum dapat dipastikan. Coba buat ulang atau periksa status tagihan sebelum membatalkan.")
+        if order.airpay_transaction_id and order.airpay_status not in {"EXPIRED", "FAILED", "CANCELLED"}:
+            order.status = "CANCEL_REQUESTED"
+            order.payment_message = "Permintaan pembatalan menunggu konfirmasi AirPay. Jangan bayar QRIS ini."
+            order.updated_at = utc_now()
+            _queue_prepayment_terminal_cleanup(db, order, retain_credentials=True)
+            db.commit()
+            return _order_payload(order)
+        if order.airpay_status == "PENDING":
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Tagihan AirPay belum memiliki ID transaksi yang valid.")
     old_proof = payment_proof_path(order.proof_filename) if order.proof_filename else None
     order.status = "CANCELLED"
     order.updated_at = utc_now()
-    if order.prepayment_check_id:
-        check = db.get(PendingMT5Verification, order.prepayment_check_id)
-        if check is not None:
-            db.delete(check)
-        order.prepayment_check_id = None
+    _queue_prepayment_terminal_cleanup(db, order)
+    if order.payment_provider == "AIRPAY":
+        order.payment_message = "Pesanan dibatalkan. Sesi terminal pemeriksaan sedang dibersihkan."
     db.commit()
     if old_proof is not None:
         try:
