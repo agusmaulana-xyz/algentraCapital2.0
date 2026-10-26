@@ -1,13 +1,13 @@
 import json
 import math
 import re
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import PROJECT_ROOT, get_settings
@@ -18,6 +18,7 @@ from ..models import (
     MT5MasterAccountState,
     MT5MasterEquityCandle,
     MT5MasterMarketState,
+    Trade,
     utc_now,
 )
 from ..time_utils import WIB, as_utc, wib_iso
@@ -200,6 +201,75 @@ def public_performance_payload(db: Session, *, include_equity_curve: bool = True
 @router.get("/api/public/performance")
 def public_performance(db: Session = Depends(get_db)) -> dict[str, object]:
     return public_performance_payload(db)
+
+
+@router.get("/api/public/performance/pnl-calendar")
+def public_pnl_calendar(
+    month: str | None = Query(default=None, min_length=7, max_length=7, pattern=r"^\d{4}-\d{2}$"),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    now_wib = utc_now().astimezone(WIB)
+    business_date = now_wib.date() if now_wib.hour >= 7 else now_wib.date() - timedelta(days=1)
+    selected_month = month or business_date.strftime("%Y-%m")
+    try:
+        month_start_date = datetime.strptime(selected_month, "%Y-%m").date().replace(day=1)
+        if not 1970 <= month_start_date.year <= 9998:
+            raise ValueError("Tahun di luar jangkauan")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Bulan harus berformat YYYY-MM") from exc
+
+    next_month_date = (
+        date(month_start_date.year + 1, 1, 1)
+        if month_start_date.month == 12
+        else date(month_start_date.year, month_start_date.month + 1, 1)
+    )
+    # Satu hari PnL dimulai pukul 07.00 WIB dan berakhir tepat sebelum 07.00 WIB berikutnya.
+    start_utc = datetime.combine(month_start_date, time(hour=7), tzinfo=WIB).astimezone(timezone.utc)
+    end_utc = datetime.combine(next_month_date, time(hour=7), tzinfo=WIB).astimezone(timezone.utc)
+    closed_trades = db.execute(
+        select(Trade.closed_at, Trade.profit)
+        .where(
+            Trade.closed_at.is_not(None),
+            Trade.closed_at >= start_utc,
+            Trade.closed_at < end_utc,
+            or_(Trade.result.is_(None), Trade.result != "EXPIRED"),
+        )
+        .order_by(Trade.closed_at.asc(), Trade.id.asc())
+    ).all()
+
+    days: dict[str, dict[str, float | int]] = {}
+    total_pnl = 0.0
+    latest_close: datetime | None = None
+    for closed_at, raw_profit in closed_trades:
+        if closed_at is None:
+            continue
+        closed_at_wib = as_utc(closed_at).astimezone(WIB)
+        pnl_date = (closed_at_wib - timedelta(hours=7)).date().isoformat()
+        profit = float(raw_profit or 0.0)
+        day = days.setdefault(pnl_date, {"pnl": 0.0, "closed_trades": 0})
+        day["pnl"] = float(day["pnl"]) + profit
+        day["closed_trades"] = int(day["closed_trades"]) + 1
+        total_pnl += profit
+        if latest_close is None or as_utc(closed_at) > as_utc(latest_close):
+            latest_close = closed_at
+
+    master_account = db.get(MT5MasterAccountState, 1)
+    return {
+        "month": month_start_date.strftime("%Y-%m"),
+        "business_date": business_date.isoformat(),
+        "currency": master_account.currency if master_account else None,
+        "total_pnl": round(total_pnl, 2),
+        "closed_trades": len(closed_trades),
+        "updated_at": wib_iso(latest_close),
+        "days": [
+            {
+                "date": day,
+                "pnl": round(float(values["pnl"]), 2),
+                "closed_trades": int(values["closed_trades"]),
+            }
+            for day, values in sorted(days.items())
+        ],
+    }
 
 
 @router.get("/api/public/registration-status")

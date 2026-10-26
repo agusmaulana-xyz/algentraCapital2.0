@@ -528,6 +528,10 @@ def result(payload: TradeResultReport, db: Session = Depends(get_db)) -> dict[st
                         signal.status = "BE" if abs(total_profit) < 0.005 else "WIN" if total_profit > 0 else "LOSS"
     db.add(SystemLog(level="INFO", source="EA", message=f"Ticket {ticket} ditutup: {payload.result}, profit {payload.profit:g}"))
     db.commit()
+    if public_performance_hub.connected:
+        live_payload = public_performance_payload(db, include_equity_curve=False)
+        live_payload["pnl_updated"] = True
+        public_performance_hub.publish(live_payload)
     return {"status": payload.result, "ticket": ticket, "duplicate": False}
 
 

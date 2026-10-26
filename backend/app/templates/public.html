@@ -120,6 +120,37 @@
   .chart-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; color: var(--text-2); font-size: 12px; }
   .chart-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  .pnl-calendar-panel { margin-top: 16px; }
+  .pnl-calendar-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .pnl-calendar-heading h3 { margin: 5px 0 4px; font-size: clamp(20px, 2.5vw, 26px); font-weight: 600; letter-spacing: -.025em; }
+  .pnl-calendar-heading p { margin: 0; color: var(--text-2); font-size: 13px; }
+  .pnl-calendar-nav { display: flex; align-items: center; gap: 10px; }
+  .pnl-calendar-month { min-width: 150px; color: var(--text); font-size: 14px; font-weight: 600; text-align: center; text-transform: capitalize; }
+  .pnl-calendar-nav-button { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid var(--border); border-radius: 11px; color: var(--text); background: var(--surface); font: inherit; font-size: 22px; line-height: 1; cursor: pointer; transition: border-color .2s ease, background .2s ease, transform .2s ease; }
+  .pnl-calendar-nav-button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+  .pnl-calendar-nav-button:disabled { cursor: not-allowed; opacity: .4; }
+  .pnl-calendar-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin: 20px 0 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
+  .pnl-calendar-summary small, .pnl-calendar-updated { color: var(--text-2); font-size: 12px; }
+  .pnl-calendar-total { font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pnl-calendar-count { color: var(--text-2); font-size: 13px; }
+  .pnl-calendar-weekdays, .pnl-calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 7px; }
+  .pnl-calendar-weekday { padding: 5px 2px; color: var(--text-2); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-align: center; text-transform: uppercase; }
+  .pnl-calendar-day, .pnl-calendar-blank { min-width: 0; min-height: 92px; border: 1px solid var(--border); border-radius: 12px; }
+  .pnl-calendar-day { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; padding: 10px; color: var(--text); background: var(--surface); text-align: left; cursor: pointer; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
+  .pnl-calendar-day:hover:not(:disabled) { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); }
+  .pnl-calendar-day:disabled { cursor: default; opacity: .45; }
+  .pnl-calendar-day.is-selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .pnl-calendar-day.is-today .pnl-calendar-date { color: var(--accent); }
+  .pnl-calendar-date { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pnl-calendar-value { max-width: 100%; overflow: hidden; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+  .pnl-calendar-trades { margin-top: auto; color: var(--text-2); font-size: 10px; }
+  .pnl-calendar-detail { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; margin-top: 15px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .pnl-calendar-detail strong { font-size: 14px; font-weight: 600; }
+  .pnl-calendar-detail span { color: var(--text-2); font-size: 13px; }
+  .pnl-calendar-updated { display: block; margin-top: 8px; }
+  .pnl-calendar-message { padding: 20px 10px; color: var(--text-2); font-size: 13px; text-align: center; }
+  .pnl-calendar-message[hidden] { display: none; }
+
   .watchlist-panel .panel-head { margin-bottom: 12px; }
   .quote-list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
   .quote-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
@@ -217,6 +248,15 @@
     .community-count { grid-column: 1 / -1; justify-content: flex-start; }
     .panel { padding: 16px; }
     .chart-wrap { height: 190px; max-height: 190px; }
+    .pnl-calendar-heading { gap: 12px; }
+    .pnl-calendar-nav { width: 100%; justify-content: space-between; }
+    .pnl-calendar-day, .pnl-calendar-blank { min-height: 76px; border-radius: 9px; }
+    .pnl-calendar-day { gap: 5px; padding: 7px 5px; }
+    .pnl-calendar-value { font-size: 10px; }
+    .pnl-calendar-trades { font-size: 9px; }
+    .pnl-calendar-grid { gap: 4px; }
+    .pnl-calendar-summary { gap: 5px 12px; margin-top: 15px; padding: 12px; }
+    .pnl-calendar-total { font-size: 19px; }
     .quote-list { grid-template-columns: minmax(0, 1fr); gap: 8px; }
     .quote-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "sym bid ask" "meta meta meta"; align-items: center; column-gap: 18px; row-gap: 6px; padding: 12px 14px; }
     .quote-card .quote-symbol { grid-area: sym; }
@@ -336,6 +376,35 @@
         <div id="market-prices" class="quote-list"></div>
       </article>
     </div>
+    <article class="panel pnl-calendar-panel" aria-labelledby="pnl-calendar-title">
+      <div class="pnl-calendar-heading">
+        <div>
+          <span class="section-kicker">PnL terealisasi</span>
+          <h3 id="pnl-calendar-title">Kalender PnL Equity Index Algentra Capital</h3>
+          <p>Hari PnL dihitung pukul 07.00–06.59 WIB dari laporan penutupan trade EA akun utama.</p>
+        </div>
+        <div class="pnl-calendar-nav" role="group" aria-label="Pilih bulan kalender PnL">
+          <button id="pnl-calendar-prev" class="pnl-calendar-nav-button" type="button" aria-label="Bulan sebelumnya">‹</button>
+          <strong id="pnl-calendar-month" class="pnl-calendar-month" aria-live="polite">Memuat bulan…</strong>
+          <button id="pnl-calendar-next" class="pnl-calendar-nav-button" type="button" aria-label="Bulan berikutnya">›</button>
+        </div>
+      </div>
+      <div class="pnl-calendar-summary" aria-live="polite">
+        <small>Total bulan</small>
+        <strong id="pnl-calendar-total" class="pnl-calendar-total">—</strong>
+        <span id="pnl-calendar-count" class="pnl-calendar-count">Menunggu data</span>
+      </div>
+      <div class="pnl-calendar-weekdays" aria-hidden="true">
+        <span class="pnl-calendar-weekday">Sen</span><span class="pnl-calendar-weekday">Sel</span><span class="pnl-calendar-weekday">Rab</span><span class="pnl-calendar-weekday">Kam</span><span class="pnl-calendar-weekday">Jum</span><span class="pnl-calendar-weekday">Sab</span><span class="pnl-calendar-weekday">Min</span>
+      </div>
+      <div id="pnl-calendar-grid" class="pnl-calendar-grid" role="grid" aria-label="Kalender PnL bulanan"></div>
+      <p id="pnl-calendar-message" class="pnl-calendar-message" role="status" hidden></p>
+      <div class="pnl-calendar-detail" aria-live="polite">
+        <strong id="pnl-calendar-selected-date">Pilih tanggal</strong>
+        <span id="pnl-calendar-selected-value">—</span>
+      </div>
+      <small id="pnl-calendar-updated" class="pnl-calendar-updated"></small>
+    </article>
   </section>
 
   <section class="public-section" id="approach">
@@ -480,6 +549,145 @@
     return node;
   };
   const setStatus = (node, text, state) => { node.textContent = text; node.dataset.state = state || ""; };
+
+  /* ---------- Kalender PnL terealisasi ---------- */
+  const pnlCalendar = {
+    month: null,
+    selectedDate: null,
+    days: new Map(),
+    requestId: 0,
+    businessDate: null,
+    currency: null,
+  };
+  const pnlGrid = $("#pnl-calendar-grid");
+  const pnlMonth = $("#pnl-calendar-month");
+  const pnlPrev = $("#pnl-calendar-prev");
+  const pnlNext = $("#pnl-calendar-next");
+  const pnlCalendarMessage = $("#pnl-calendar-message");
+  const monthDate = (month) => {
+    const [year, number] = month.split("-").map(Number);
+    return new Date(Date.UTC(year, number - 1, 1));
+  };
+  const moveMonth = (month, offset) => {
+    const date = monthDate(month);
+    date.setUTCMonth(date.getUTCMonth() + offset);
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+  };
+  const calendarDateLabel = (isoDate, options = { weekday: "long", day: "numeric", month: "long", year: "numeric" }) => {
+    const [year, month, day] = isoDate.split("-").map(Number);
+    return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString("id-ID", { ...options, timeZone: "UTC" });
+  };
+  const renderPnlSelection = () => {
+    const selected = pnlCalendar.days.get(pnlCalendar.selectedDate);
+    const dateNode = $("#pnl-calendar-selected-date");
+    const valueNode = $("#pnl-calendar-selected-value");
+    dateNode.textContent = pnlCalendar.selectedDate ? calendarDateLabel(pnlCalendar.selectedDate) : "Pilih tanggal";
+    valueNode.textContent = selected
+      ? `${money(selected.pnl, pnlCalendar.currency)} · ${Number(selected.closed_trades).toLocaleString("id-ID")} trade tertutup`
+      : "Tidak ada transaksi tertutup pada tanggal ini.";
+    valueNode.dataset.tone = selected ? tone(Number(selected.pnl)) : "";
+    pnlGrid.querySelectorAll(".pnl-calendar-day").forEach((button) => {
+      const isSelected = button.dataset.date === pnlCalendar.selectedDate;
+      button.classList.toggle("is-selected", isSelected);
+      button.setAttribute("aria-selected", String(isSelected));
+    });
+  };
+  const renderPnlCalendar = (data) => {
+    const previousBusinessDate = pnlCalendar.businessDate;
+    const wasFollowingBusinessDate = pnlCalendar.selectedDate === previousBusinessDate;
+    pnlCalendar.month = data.month;
+    pnlCalendar.businessDate = data.business_date;
+    pnlCalendar.currency = data.currency || "";
+    pnlCalendar.days = new Map((Array.isArray(data.days) ? data.days : []).map((day) => [day.date, day]));
+    const monthStart = monthDate(data.month);
+    const year = monthStart.getUTCFullYear();
+    const monthNumber = monthStart.getUTCMonth();
+    const numberOfDays = new Date(Date.UTC(year, monthNumber + 1, 0)).getUTCDate();
+    const mondayOffset = (monthStart.getUTCDay() + 6) % 7;
+    const slots = Math.ceil((mondayOffset + numberOfDays) / 7) * 7;
+    const currentMonth = data.business_date.slice(0, 7);
+    pnlMonth.textContent = monthStart.toLocaleDateString("id-ID", { month: "long", year: "numeric", timeZone: "UTC" });
+    pnlPrev.disabled = data.month <= "1970-01";
+    pnlNext.disabled = data.month >= currentMonth;
+    $("#pnl-calendar-total").textContent = money(Number(data.total_pnl || 0), pnlCalendar.currency);
+    $("#pnl-calendar-total").dataset.tone = tone(Number(data.total_pnl || 0));
+    const tradeCount = Number(data.closed_trades || 0);
+    $("#pnl-calendar-count").textContent = `${tradeCount.toLocaleString("id-ID")} trade tertutup`;
+    $("#pnl-calendar-updated").textContent = data.updated_at
+      ? `Penutupan terakhir tercatat ${wib(data.updated_at, { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })}.`
+      : "Belum ada laporan penutupan trade pada bulan ini.";
+
+    pnlGrid.replaceChildren();
+    pnlCalendarMessage.hidden = true;
+    for (let slot = 0; slot < slots; slot++) {
+      const dayNumber = slot - mondayOffset + 1;
+      if (dayNumber < 1 || dayNumber > numberOfDays) {
+        const blank = el("span", "pnl-calendar-blank", undefined, pnlGrid);
+        blank.setAttribute("aria-hidden", "true");
+        continue;
+      }
+      const isoDate = `${data.month}-${String(dayNumber).padStart(2, "0")}`;
+      const dayData = pnlCalendar.days.get(isoDate);
+      const future = isoDate > data.business_date;
+      const button = el("button", "pnl-calendar-day", undefined, pnlGrid);
+      button.type = "button";
+      button.dataset.date = isoDate;
+      button.setAttribute("role", "gridcell");
+      button.disabled = future;
+      button.classList.toggle("is-today", isoDate === data.business_date);
+      const label = `${calendarDateLabel(isoDate)}; ${dayData ? `${money(dayData.pnl, pnlCalendar.currency)}, ${dayData.closed_trades} trade tertutup` : "tidak ada transaksi tertutup"}`;
+      button.setAttribute("aria-label", label);
+      el("span", "pnl-calendar-date", String(dayNumber), button);
+      const amount = el("span", "pnl-calendar-value", dayData ? money(dayData.pnl, pnlCalendar.currency) : "—", button);
+      if (dayData) amount.dataset.tone = tone(Number(dayData.pnl));
+      if (dayData) el("span", "pnl-calendar-trades", `${Number(dayData.closed_trades).toLocaleString("id-ID")} trade`, button);
+    }
+    if (!pnlCalendar.selectedDate || !pnlCalendar.selectedDate.startsWith(`${data.month}-`)) {
+      pnlCalendar.selectedDate = data.business_date.startsWith(`${data.month}-`) ? data.business_date : `${data.month}-01`;
+    } else if (wasFollowingBusinessDate && previousBusinessDate !== data.business_date && data.business_date.startsWith(`${data.month}-`)) {
+      pnlCalendar.selectedDate = data.business_date;
+    }
+    renderPnlSelection();
+  };
+  const loadPnlCalendar = async (month, resetSelection = false) => {
+    const requestId = ++pnlCalendar.requestId;
+    if (resetSelection) pnlCalendar.selectedDate = null;
+    if (!pnlCalendar.month) pnlCalendarMessage.hidden = false;
+    pnlCalendarMessage.textContent = "Memuat data PnL…";
+    try {
+      const query = month ? `?month=${encodeURIComponent(month)}` : "";
+      const response = await fetch(`/api/public/performance/pnl-calendar${query}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (requestId !== pnlCalendar.requestId) return;
+      renderPnlCalendar(data);
+    } catch (_) {
+      if (requestId !== pnlCalendar.requestId) return;
+      pnlCalendarMessage.textContent = "Data kalender PnL belum dapat dimuat. Coba lagi sebentar.";
+      pnlCalendarMessage.hidden = false;
+    }
+  };
+  pnlGrid.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-date]");
+    if (!button || button.disabled) return;
+    pnlCalendar.selectedDate = button.dataset.date;
+    renderPnlSelection();
+  });
+  pnlPrev.addEventListener("click", () => {
+    if (pnlCalendar.month && pnlCalendar.month > "1970-01") void loadPnlCalendar(moveMonth(pnlCalendar.month, -1), true);
+  });
+  pnlNext.addEventListener("click", () => {
+    if (pnlCalendar.month && pnlCalendar.month < pnlCalendar.businessDate.slice(0, 7)) {
+      void loadPnlCalendar(moveMonth(pnlCalendar.month, 1), true);
+    }
+  });
+  void loadPnlCalendar(null, true);
+  setInterval(() => {
+    if (!document.hidden) {
+      const viewingCurrentMonth = !pnlCalendar.month || pnlCalendar.month === pnlCalendar.businessDate?.slice(0, 7);
+      void loadPnlCalendar(viewingCurrentMonth ? null : pnlCalendar.month);
+    }
+  }, 60000);
 
   /* ---------- Grafik equity ---------- */
   let lastCurve = [];
@@ -740,7 +948,14 @@
     setStatus($("#market-status"), "Menghubungkan", "warn");
     const heartbeat = setInterval(() => { if (socket.readyState === WebSocket.OPEN) socket.send("ping"); }, 25000);
     socket.addEventListener("message", (event) => {
-      try { renderPerformance(JSON.parse(event.data)); }
+      try {
+        const data = JSON.parse(event.data);
+        renderPerformance(data);
+        if (data.pnl_updated && pnlCalendar.month) {
+          const viewingCurrentMonth = pnlCalendar.month === pnlCalendar.businessDate?.slice(0, 7);
+          void loadPnlCalendar(viewingCurrentMonth ? null : pnlCalendar.month);
+        }
+      }
       catch (_) { setStatus($("#market-status"), "Data tidak valid", "warn"); }
     });
     socket.addEventListener("close", () => {
