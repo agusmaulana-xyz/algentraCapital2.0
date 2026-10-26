@@ -104,12 +104,13 @@ class PrepaymentMT5SessionReport(BaseModel):
 
 
 class PrepaymentMT5CheckRequest(BaseModel):
+    check_id: str | None = Field(default=None, min_length=24, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     label: str = Field(min_length=1, max_length=80)
     server: str = Field(min_length=1, max_length=128)
     login: str = Field(min_length=1, max_length=32, pattern=r"^\d+$")
     plan: Literal["ZERO", "PRO", "EXPERT"]
     execution_mode: Literal["EA", "MANAGED"]
-    broker_password: str = Field(min_length=1, max_length=128)
+    broker_password: str | None = Field(default=None, max_length=128)
 
 
 class CSChatMessageRequest(BaseModel):

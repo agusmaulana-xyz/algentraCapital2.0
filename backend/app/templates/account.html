@@ -135,6 +135,9 @@ let prepaymentCheckId = null;
 let prepaymentCheckExpiresAt = 0;
 let prepaymentCheckRun = 0;
 let prepaymentSessionTimer = null;
+let prepaymentCheckInProgress = false;
+let pendingPrepaymentRequestId = null;
+let pendingPrepaymentRequestStartedAt = 0;
 
 const accountLoginInput = document.querySelector('#account-form [name="login"]');
 accountLoginInput.addEventListener("input", () => {
@@ -152,18 +155,29 @@ let brokerSearchTimer = null;
 let brokerSearchRun = 0;
 
 function invalidatePrepaymentCheck() {
+  const wasChecking = prepaymentCheckInProgress;
   prepaymentCheckRun += 1;
+  prepaymentCheckInProgress = false;
   prepaymentCheckId = null;
   prepaymentCheckExpiresAt = 0;
+  pendingPrepaymentRequestId = null;
+  pendingPrepaymentRequestStartedAt = 0;
   if (prepaymentSessionTimer) clearInterval(prepaymentSessionTimer);
   prepaymentSessionTimer = null;
   brokerPasswordInput.required = true;
   continuePaymentButton.disabled = true;
-  if (!prepaymentCheckButton.disabled) statusBox.textContent = "Data akun berubah. Periksa koneksi MT5 kembali sebelum melanjutkan pembayaran.";
+  if (wasChecking) prepaymentCheckButton.disabled = !managedWorkerReady;
+  if (wasChecking || !prepaymentCheckButton.disabled) statusBox.textContent = "Data akun berubah. Periksa koneksi MT5 kembali sebelum melanjutkan pembayaran.";
 }
 
 accountForm.addEventListener("input", invalidatePrepaymentCheck);
 accountForm.addEventListener("change", invalidatePrepaymentCheck);
+
+function newPrepaymentRequestId() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
 
 function closeBrokerServerOptions() {
   brokerServerOptions.hidden = true;
@@ -222,15 +236,21 @@ document.addEventListener("click", (event) => {
 prepaymentCheckButton.addEventListener("click", async () => {
   statusBox.textContent = "";
   const hasUsableCheck = Boolean(prepaymentCheckId);
-  brokerPasswordInput.required = true;
+  const canResumePendingCheck = Boolean(pendingPrepaymentRequestId);
+  brokerPasswordInput.required = !hasUsableCheck && !canResumePendingCheck;
   if (!accountForm.reportValidity()) {
     if (hasUsableCheck) brokerPasswordInput.required = false;
     return;
   }
   const run = ++prepaymentCheckRun;
+  prepaymentCheckInProgress = true;
   if (prepaymentSessionTimer) clearInterval(prepaymentSessionTimer);
   prepaymentSessionTimer = null;
-  const checkStartedAt = Date.now();
+  if (!pendingPrepaymentRequestId) {
+    pendingPrepaymentRequestId = newPrepaymentRequestId();
+    pendingPrepaymentRequestStartedAt = Date.now();
+  }
+  const checkStartedAt = pendingPrepaymentRequestStartedAt;
   prepaymentCheckId = null;
   prepaymentCheckExpiresAt = 0;
   continuePaymentButton.disabled = true;
@@ -242,20 +262,44 @@ prepaymentCheckButton.addEventListener("click", async () => {
     plan: accountForm.querySelector('[name="plan"]:checked')?.value,
     execution_mode: accountForm.querySelector('[name="execution_mode"]:checked')?.value,
     broker_password: brokerPasswordInput.value,
+    check_id: pendingPrepaymentRequestId,
   };
   try {
-    const check = await api("/api/mt5/prepayment-checks", {method:"POST", body:JSON.stringify(payload)});
+    let check = null;
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      if (run !== prepaymentCheckRun) return;
+      try {
+        check = await api("/api/mt5/prepayment-checks", {method:"POST", body:JSON.stringify(payload)});
+        break;
+      } catch (error) {
+        if (!error.cloudflare502) throw error;
+        statusBox.textContent = "Pemeriksaan sedang berlangsung. Menunggu respons server VPS...";
+        if (attempt < 89) await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+    if (!check) {
+      statusBox.textContent = "Pemeriksaan belum mendapat jawaban dari server. Klik periksa lagi untuk melanjutkan sesi yang sama.";
+      return;
+    }
     brokerPasswordInput.value = "";
-    statusBox.textContent = "Login MT5 sedang diperiksa. Proses ini hanya menguji koneksi dan tidak mengirim order.";
+    statusBox.textContent = "Pemeriksaan sedang berlangsung. Proses ini hanya menguji koneksi dan tidak mengirim order.";
     let finalResult = null;
     for (let attempt = 0; attempt < 90; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
       if (run !== prepaymentCheckRun) return;
-      finalResult = await api(`/api/mt5/prepayment-checks/${encodeURIComponent(check.check_id)}`, {cache:"no-store"});
+      try {
+        finalResult = await api(`/api/mt5/prepayment-checks/${encodeURIComponent(check.check_id)}`, {cache:"no-store"});
+      } catch (error) {
+        if (!error.cloudflare502) throw error;
+        statusBox.textContent = "Pemeriksaan sedang berlangsung. Menunggu respons server VPS...";
+        continue;
+      }
       if (["VALID", "INVALID", "EXPIRED"].includes(finalResult.status)) break;
     }
     if (run !== prepaymentCheckRun) return;
     if (finalResult?.status === "VALID") {
+      pendingPrepaymentRequestId = null;
+      pendingPrepaymentRequestStartedAt = 0;
       prepaymentCheckId = check.check_id;
       prepaymentCheckExpiresAt = checkStartedAt + 30 * 60 * 1000;
       brokerPasswordInput.required = false;
@@ -269,16 +313,27 @@ prepaymentCheckButton.addEventListener("click", async () => {
         statusBox.textContent = "Login broker berhasil. Anda dapat melanjutkan ke pembayaran.";
       }
     } else if (finalResult?.status === "INVALID") {
+      pendingPrepaymentRequestId = null;
+      pendingPrepaymentRequestStartedAt = 0;
       statusBox.textContent = finalResult.message || "Login gagal. Periksa ID akun, server, dan password MT5 lalu coba lagi.";
     } else if (finalResult?.status === "EXPIRED") {
+      pendingPrepaymentRequestId = null;
+      pendingPrepaymentRequestStartedAt = 0;
       statusBox.textContent = finalResult.message || "Sesi pemeriksaan berakhir. Periksa koneksi MT5 kembali.";
     } else {
-      statusBox.textContent = "Pemeriksaan MT5 belum mendapat jawaban dalam 3 menit. Pastikan worker online lalu coba lagi.";
+      statusBox.textContent = "Pemeriksaan belum mendapat jawaban dalam 3 menit. Klik periksa lagi untuk melanjutkan sesi yang sama.";
     }
   } catch (error) {
-    if (run === prepaymentCheckRun) statusBox.textContent = error.message;
+    if (run === prepaymentCheckRun) {
+      statusBox.textContent = error.cloudflare502
+        ? "Pemeriksaan sedang berlangsung. Koneksi ke server VPS sedang dipulihkan."
+        : error.message;
+    }
   } finally {
-    if (run === prepaymentCheckRun) prepaymentCheckButton.disabled = false;
+    if (run === prepaymentCheckRun) {
+      prepaymentCheckInProgress = false;
+      prepaymentCheckButton.disabled = !managedWorkerReady;
+    }
   }
 });
 
@@ -314,7 +369,9 @@ async function refreshPrepaymentSession() {
         : "";
     statusBox.textContent = "Login MT5 tersambung · " + balance + equity + floating + observed + ". Copy trading tetap off sampai Anda menekan Mulai." + permissionWarning;
   } catch (error) {
-    statusBox.textContent = "Sesi MT5 tersimpan; pembaruan saldo tertunda: " + error.message;
+    statusBox.textContent = error.cloudflare502
+      ? "Login broker berhasil. Pembaruan sesi dan saldo sedang berlangsung."
+      : "Sesi MT5 tersimpan; pembaruan saldo tertunda: " + error.message;
   }
 }
 
@@ -571,7 +628,17 @@ async function loadAccounts() {
     eaSection.hidden = !accounts.some((account) => account.execution_mode !== "MANAGED");
     if (!accounts.length) { accountsBox.textContent = "Belum ada akun MT5."; return; }
     accounts.forEach(addAccountCard);
-  } catch (error) { statusBox.textContent = error.message; }
+  } catch (error) {
+    if (error.cloudflare502) {
+      if (prepaymentCheckInProgress) {
+        statusBox.textContent = "Pemeriksaan sedang berlangsung. Menunggu respons server VPS...";
+      } else if (prepaymentCheckId) {
+        statusBox.textContent = "Login broker berhasil. Pembaruan sesi dan saldo sedang berlangsung.";
+      }
+      return;
+    }
+    statusBox.textContent = error.message;
+  }
 }
 
 accountForm.addEventListener("submit", async (event) => {

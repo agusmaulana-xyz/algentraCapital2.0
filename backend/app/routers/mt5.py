@@ -6,7 +6,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -122,7 +122,35 @@ def create_prepayment_mt5_check(
     login = payload.login.strip()
     if not label or not server or not login:
         raise HTTPException(status_code=422, detail="Nama akun, server, dan nomor login wajib diisi")
+
+    # The browser retries a request after a Cloudflare 502 using the same
+    # opaque ID. Reuse its original check instead of launching another MT5 login.
+    db.execute(text("BEGIN IMMEDIATE"))
+    if payload.check_id:
+        existing = db.get(PendingMT5Verification, payload.check_id)
+        if existing is not None:
+            if existing.owner_id != owner_id:
+                db.rollback()
+                raise HTTPException(status_code=404, detail="Sesi pemeriksaan login tidak ditemukan")
+            if (
+                existing.label != label
+                or existing.server.casefold() != server.casefold()
+                or existing.login != login
+                or existing.plan != payload.plan
+                or existing.execution_mode != payload.execution_mode
+            ):
+                db.rollback()
+                raise HTTPException(status_code=409, detail="ID pemeriksaan sudah digunakan untuk data akun lain")
+            result = {"check_id": existing.id, "status": existing.status, "message": existing.message or ""}
+            db.commit()
+            return result
+
+    if not payload.broker_password:
+        db.rollback()
+        raise HTTPException(status_code=422, detail="Password trading MT5 wajib diisi untuk pemeriksaan baru")
+
     if not _managed_worker_online(db):
+        db.rollback()
         raise HTTPException(
             status_code=409,
             detail="Pemeriksaan login MT5 belum tersedia. Pastikan worker copier online lalu coba lagi.",
@@ -134,7 +162,7 @@ def create_prepayment_mt5_check(
         PendingMT5Verification.status != "ORDERED",
     ))
     check = PendingMT5Verification(
-        id=secrets.token_urlsafe(24),
+        id=payload.check_id or secrets.token_urlsafe(24),
         owner_id=owner_id,
         label=label,
         server=server,

@@ -428,7 +428,10 @@
             errorOrigin && `origin ${errorOrigin}`,
             rayId && `Ray ID ${rayId}`
           ].filter(Boolean).join(" · ");
-          throw new Error(`HTTP 502 Bad Gateway${diagnostics ? ` (${diagnostics})` : ""}. Server VPS atau koneksi Cloudflare Tunnel tidak merespons. Periksa layanan backend pada port 8000 dan log cloudflared.`);
+          const error = new Error(`HTTP 502 Bad Gateway${diagnostics ? ` (${diagnostics})` : ""}. Server VPS atau koneksi Cloudflare Tunnel tidak merespons. Periksa layanan backend pada port 8000 dan log cloudflared.`);
+          error.status = response.status;
+          error.cloudflare502 = true;
+          throw error;
         }
         const message = raw.replace(/\s+/g, " ").trim().slice(0, 240);
         throw new Error(`Server membalas HTTP ${response.status} dengan format non-JSON: ${message}`);
