@@ -57,7 +57,7 @@ Untuk menjalankan di lokal, mulai backend dengan `run.bat`, login-kan terminal M
 - `GET /api/settings` dan `PUT /api/settings` dengan body `{"values":{"confidence_threshold":0.75}}`
 - `POST /api/parser/test` untuk menguji klasifikasi dan validasi. Halaman admin tersedia di `/parser-test`.
 - Telegram: `GET /api/tg/status`, `POST /api/tg/send-code`, `POST /api/tg/verify-code`, `POST /api/tg/verify-2fa`, `POST /api/tg/logout`, `POST /api/tg/reconnect`, `GET /api/tg/groups`, dan `POST /api/tg/groups/select`.
-- EA: `GET /api/ea/pending`, `POST /api/ea/report`, `POST /api/ea/result`, `POST /api/ea/heartbeat`, dan `POST /api/ea/master/snapshot` memakai header `X-API-Key` yang nilainya sama dengan `EA_API_KEY`.
+- EA: `GET /api/ea/pending`, `POST /api/ea/report`, `POST /api/ea/result`, `POST /api/ea/heartbeat`, `POST /api/ea/master/snapshot`, dan `POST /api/ea/scalper/trade` memakai header `X-API-Key` yang nilainya sama dengan `EA_API_KEY`.
 
 ## Website publik dan workspace operasi
 
@@ -104,6 +104,19 @@ Session Telethon berada di `backend/data/telegram_user.session`, tidak disajikan
 Resolusi simbol mencoba nama persis, akhiran broker yang unik, lalu pemetaan eksplisit. EA Telegram utama mendeteksi akun cent dari mata uang akun atau identitas server; untuk signal `XAUUSD`, EA otomatis memilih `XAUUSDc` bila tersedia. EA juga menyesuaikan spread, slippage, dan jarak SL/TP bawaan jika simbol cent memakai satu angka desimal tambahan. Status serta alasan menunggu/penolakan order tampil di panel EA dan tab Experts. Jika broker memakai nama lain, isi `SymbolSuffix` atau `SymbolMapCsv` dalam format `XAUUSD=XAUUSDc`. EA Copy Trading follower tetap dapat memakai pengaturan suffix/pemetaan sendiri. `MarketWatchlistCsv` mengatur simbol yang dipublikasikan EA utama untuk panel harga.
 
 `GET /api/ea/pending` mengklaim signal selama 90 detik. Jika simbol atau quote belum tersedia, izin trading mati, atau spread melewati batas, EA mencoba signal kembali sampai kedaluwarsa satu jam. Jika signal lawan datang saat posisi EA di XAUUSD masih profit, signal baru diabaikan. Jika posisi lawan sedang floating minus, EA menutup posisi tersebut sebelum membuka arah baru. Jika jarak risiko SL melebihi TP terdekat tetapi masih tercakup oleh TP terjauh, backend menyimpan TP terjauh saja; EA lalu memvalidasi jarak SL terhadap target itu. Sinyal tetap ditolak jika TP terjauh pun tidak cukup. Untuk sinyal MARKET tanpa entry, backend memilih TP terjauh agar EA dapat memvalidasinya terhadap quote live. EA menyimpan penanda idempotensi per entry dan mengirim ulang laporan bila perlu agar polling/restart tidak membuat order ganda. Pada mode Partial, jika sinyal memiliki beberapa TP, EA membuat satu order untuk setiap TP. Mode Single memaksa satu order dan hanya menggunakan TP pertama. Semua order memakai SL dari sinyal; bila SL tidak tersedia, EA memakai `DefaultSLPoints`. Dengan `LotMode=LOT_RISK_PERCENT` dan `RiskPercent=1.0`, anggaran risiko seluruh entry dari satu sinyal adalah sekitar 1% ekuitas akun jika semua entry mencapai SL. Anggaran uang itu dibagi rata per entry, lalu lot tiap entry dihitung dari estimasi P/L MT5 antara harga entry dan SL serta dibulatkan ke bawah sesuai langkah lot broker. Khusus akun cent XAUUSD, jika anggaran risiko menghasilkan lot di bawah minimum, EA mencoba lot fallback 0.01 apabila volume tersebut valid pada broker; pemeriksaan margin lokal dilewati hanya untuk fallback ini dan broker tetap memutuskan apakah order dapat diterima. Sinyal lain tetap memakai hitungan lot sebelumnya. Jumlah posisi tidak dibatasi oleh EA.
+
+## EA Scalper
+
+EA Scalper terpisah dari EA Telegram dan dapat dipasang langsung ke chart MT5. Versi saat ini membuka **satu order per sinyal dengan lot tetap 0,01**; `InpSingleEntryTarget` memilih satu dari target TP1/TP2/TP3. Volume tetap dibulatkan mengikuti batas minimum dan langkah lot broker. Jika broker tidak menerima 0,01 lot, EA menahan order dan mencatat alasannya.
+
+Untuk memasukkan posisi EA Scalper ke dashboard admin:
+
+1. Pastikan backend memakai `EA_API_KEY` yang sama dengan EA Telegram, lalu restart backend bila nilainya baru diubah.
+2. Di MT5, tambahkan alamat `InpWebsiteServerURL` ke daftar **Allow WebRequest for listed URL**. Default-nya `http://127.0.0.1:8000`; ganti dengan alamat backend yang dapat dijangkau terminal jika MT5 berjalan di komputer lain.
+3. Compile `mt5/EA Scalper.mq5` di MetaEditor, salin `EA Scalper.ex5` ke `MQL5/Experts`, lalu pasang EA pada chart instrumen yang ingin diperdagangkan.
+4. Di input EA, isi `InpWebsiteApiKey` dengan nilai `EA_API_KEY`, aktifkan `InpEnableWebsiteSync`, dan pastikan URL sama dengan alamat yang diizinkan pada langkah sebelumnya.
+
+EA mengirim heartbeat, posisi terbuka, dan hasil posisi tertutup. Dashboard admin mencatatnya pada grup **EA Scalper (magic number)**, termasuk riwayat trade, win/loss, winrate, dan profit. Laporan close menggabungkan profit, komisi, swap, dan fee dari history MT5. Jika sinkronisasi gagal sementara, EA mencoba lagi pada siklus berikutnya; hasil close yang sudah diterima tidak dihitung dua kali.
 
 ## Copy posisi dari akun utama ke akun follower
 
