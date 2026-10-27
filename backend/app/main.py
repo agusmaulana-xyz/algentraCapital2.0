@@ -16,7 +16,7 @@ from .config import PROJECT_ROOT, get_settings
 from .cs_service import cleanup_expired_conversations_periodically, purge_expired_conversations
 from .client_plans import CLIENT_PLANS
 from .database import Base, SessionLocal, engine, get_db, migrate_schema
-from .models import AppSetting, Signal, utc_now
+from .models import AppSetting, EAExecution, ScalperTrade, Signal, Trade, utc_now
 from .public_realtime import public_performance_hub
 from .routers import auth, cs as cs_router, dashboard, ea, mt5 as mt5_router, parser as parser_router, payments as payments_router, public as public_router, settings, tg as tg_router
 from .routers.mt5 import require_client_id
@@ -34,12 +34,67 @@ from .time_utils import wib_iso
 from .payment_bot import payment_review_bot
 
 
+def migrate_legacy_scalper_trades(db: Session) -> None:
+    """Move earlier EA Scalper rows out of the Telegram signal tables."""
+    legacy_rows = db.execute(
+        select(Trade, Signal)
+        .join(Signal, Signal.id == Trade.signal_id)
+        .where(Signal.group_id.like("ea-scalper:%"))
+    ).all()
+    changed = False
+    for trade, signal in legacy_rows:
+        if not trade.ticket:
+            continue
+        already_migrated = db.execute(
+            select(ScalperTrade.id).where(ScalperTrade.ticket == trade.ticket)
+        ).scalar_one_or_none() is not None
+        if not already_migrated:
+            try:
+                magic = int((signal.group_id or "").split(":", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            parts = trade.ticket.split("-")
+            position_id = parts[1] if len(parts) >= 3 and parts[0] == "SCALPER" else str(trade.id)
+            account_ref = parts[2][:16] if len(parts) >= 3 and parts[0] == "SCALPER" else f"legacy{trade.id}"[:16]
+            db.add(ScalperTrade(
+                ticket=trade.ticket,
+                position_id=position_id,
+                account_ref=account_ref,
+                magic=magic,
+                symbol=(trade.symbol or "XAUUSD").upper(),
+                action=trade.action or "BUY",
+                lots=trade.lots or 0.01,
+                entry=trade.entry or trade.exec_price or 1.0,
+                sl=trade.sl,
+                tp=trade.tp or "[]",
+                profit=trade.profit,
+                result=trade.result,
+                opened_at=trade.opened_at or signal.created_at or utc_now(),
+                closed_at=trade.closed_at,
+            ))
+            db.flush()
+        db.delete(trade)
+        db.flush()
+        remaining_trade = db.execute(
+            select(Trade.id).where(Trade.signal_id == signal.id).limit(1)
+        ).scalar_one_or_none()
+        linked_execution = db.execute(
+            select(EAExecution.id).where(EAExecution.signal_id == signal.id).limit(1)
+        ).scalar_one_or_none()
+        if remaining_trade is None and linked_execution is None:
+            db.delete(signal)
+        changed = True
+    if changed:
+        db.commit()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     migrate_schema()
     Base.metadata.create_all(bind=engine)
     config = get_settings()
     with SessionLocal() as db:
+        migrate_legacy_scalper_trades(db)
         seed_admin(db, config)
         defaults = (
             ("confidence_threshold", "0.75"),

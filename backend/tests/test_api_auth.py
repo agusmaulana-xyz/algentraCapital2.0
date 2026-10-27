@@ -296,10 +296,11 @@ def test_dashboard_endpoints_csv_and_websocket_after_login():
         assert {"telegram_connected", "gemini_configured", "ea_online", "winrate"} <= stats.json().keys()
         assert client.get("/api/signals?limit=10").status_code == 200
         assert client.get("/api/groups/stats").status_code == 200
+        assert client.get("/api/scalper/stats").status_code == 200
         assert client.get("/api/logs?level=ERROR&search=missing").status_code == 200
         assert client.get("/api/trades?result=WIN").status_code == 200
         assert "id,created_at,level,source,message" in client.get("/api/logs/export.csv").text
-        assert "ticket,group,symbol,action" in client.get("/api/trades/export.csv").text
+        assert "source,ticket,group,symbol,action" in client.get("/api/trades/export.csv").text
 
         with client.websocket_connect("/ws") as websocket:
             event = websocket.receive_json()

@@ -57,7 +57,7 @@ Untuk menjalankan di lokal, mulai backend dengan `run.bat`, login-kan terminal M
 - `GET /api/settings` dan `PUT /api/settings` dengan body `{"values":{"confidence_threshold":0.75}}`
 - `POST /api/parser/test` untuk menguji klasifikasi dan validasi. Halaman admin tersedia di `/parser-test`.
 - Telegram: `GET /api/tg/status`, `POST /api/tg/send-code`, `POST /api/tg/verify-code`, `POST /api/tg/verify-2fa`, `POST /api/tg/logout`, `POST /api/tg/reconnect`, `GET /api/tg/groups`, dan `POST /api/tg/groups/select`.
-- EA: `GET /api/ea/pending`, `POST /api/ea/report`, `POST /api/ea/result`, `POST /api/ea/heartbeat`, `POST /api/ea/master/snapshot`, dan `POST /api/ea/scalper/trade` memakai header `X-API-Key` yang nilainya sama dengan `EA_API_KEY`.
+- EA: `GET /api/ea/pending`, `POST /api/ea/report`, `POST /api/ea/result`, `POST /api/ea/heartbeat`, `POST /api/ea/master/snapshot`, `POST /api/ea/scalper/heartbeat`, dan `POST /api/ea/scalper/trade` memakai header `X-API-Key` yang nilainya sama dengan `EA_API_KEY`.
 
 ## Website publik dan workspace operasi
 
@@ -75,9 +75,9 @@ Jaga `APP_SECRET_KEY` tetap stabil selama token terenkripsi diperlukan. Jika nil
 
 ## Dashboard admin
 
-Setelah login admin, buka `/dashboard` untuk melihat statistik signal dan trade, heartbeat EA, status Telegram/Gemini, signal terbaru, statistik grup, grafik profit, log, dan riwayat trade. WebSocket `/ws` mengirim pembaruan berkala; dashboard mencoba menyambung ulang otomatis. Log dan riwayat trade dapat difilter serta diekspor ke CSV. Halaman settings mengatur confidence, symbol mapping, deviasi harga, mode entry, update signal, kill switch, dan konfigurasi Gemini. Sinyal yang dieksekusi selalu dikirim sebagai order live; tidak ada demo mode atau dry run. **Single entry** membuka satu order; untuk zona harga, order memakai titik tengah dan TP pertama. **Partial entry** mempertahankan pembagian order per TP; zona tanpa TP dibagi menjadi dua order di batas zona. Perubahan mode berlaku untuk signal baru yang diklaim EA; signal yang sudah diklaim menyimpan mode sebelumnya agar laporan entry tetap cocok. Signal dibatasi ke XAUUSD dan kedaluwarsa setelah satu jam. Chart.js dimuat dari CDN sehingga grafik memerlukan akses jaringan browser.
+Setelah login admin, buka `/dashboard` untuk melihat statistik signal dan trade, heartbeat EA, status Telegram/Gemini, signal terbaru, statistik grup Telegram, grafik performa EA Scalper, grafik profit, log, dan riwayat trade. WebSocket `/ws` mengirim pembaruan berkala; dashboard mencoba menyambung ulang otomatis. Log dan riwayat trade menandai sumber Telegram atau EA Scalper, lalu dapat difilter serta diekspor ke CSV. Halaman settings mengatur confidence, symbol mapping, deviasi harga, mode entry, update signal, kill switch, dan konfigurasi Gemini. Sinyal yang dieksekusi selalu dikirim sebagai order live; tidak ada demo mode atau dry run. **Single entry** membuka satu order; untuk zona harga, order memakai titik tengah dan TP pertama. **Partial entry** mempertahankan pembagian order per TP; zona tanpa TP dibagi menjadi dua order di batas zona. Perubahan mode berlaku untuk signal baru yang diklaim EA; signal yang sudah diklaim menyimpan mode sebelumnya agar laporan entry tetap cocok. Signal dibatasi ke XAUUSD dan kedaluwarsa setelah satu jam. Chart.js dimuat dari CDN sehingga grafik memerlukan akses jaringan browser.
 
-Endpoint dashboard (semuanya memerlukan sesi admin): `GET /api/stats`, `GET /api/signals`, `GET /api/groups/stats`, `GET /api/logs`, `GET /api/logs/export.csv`, `GET /api/trades`, `GET /api/trades/export.csv`, `GET/PUT /api/settings`, `PUT /api/settings/gemini-config`, serta `WS /ws`.
+Endpoint dashboard (semuanya memerlukan sesi admin): `GET /api/stats`, `GET /api/signals`, `GET /api/groups/stats`, `GET /api/scalper/stats`, `GET /api/logs`, `GET /api/logs/export.csv`, `GET /api/trades`, `GET /api/trades/export.csv`, `GET/PUT /api/settings`, `PUT /api/settings/gemini-config`, serta `WS /ws`.
 
 Sebelum memanggil Gemini, filter lokal hanya meneruskan pesan yang memiliki arah transaksi dan harga; percakapan serta laporan hasil trade dilewati tanpa permintaan Gemini. Backend dan EA hanya menerima XAUUSD, termasuk nama broker yang memakai suffix.
 
@@ -107,16 +107,16 @@ Resolusi simbol mencoba nama persis, akhiran broker yang unik, lalu pemetaan eks
 
 ## EA Scalper
 
-EA Scalper terpisah dari EA Telegram dan dapat dipasang langsung ke chart MT5. Versi saat ini membuka **satu order per sinyal dengan lot tetap 0,01**; `InpSingleEntryTarget` memilih satu dari target TP1/TP2/TP3. Volume tetap dibulatkan mengikuti batas minimum dan langkah lot broker. Jika broker tidak menerima 0,01 lot, EA menahan order dan mencatat alasannya.
+EA Scalper terpisah dari EA Telegram dan dapat dipasang di chart MT5 lain. Versi saat ini membuka **satu order per sinyal dengan lot tetap 0,01** dan hanya mengizinkan satu posisi aktif untuk magic number EA Scalper. `InpSingleEntryTarget` memilih satu dari target TP1/TP2/TP3. SL dipasang saat entry dan tidak digeser ke breakeven/SL+. Volume dibulatkan mengikuti aturan broker; jika broker tidak menerima 0,01 lot, EA menahan order dan mencatat alasannya.
 
 Untuk memasukkan posisi EA Scalper ke dashboard admin:
 
 1. Pastikan backend memakai `EA_API_KEY` yang sama dengan EA Telegram, lalu restart backend bila nilainya baru diubah.
-2. Di MT5, tambahkan alamat `InpWebsiteServerURL` ke daftar **Allow WebRequest for listed URL**. Default-nya `http://127.0.0.1:8000`; ganti dengan alamat backend yang dapat dijangkau terminal jika MT5 berjalan di komputer lain.
+2. Di MT5, tambahkan `https://algentracapital.my.id` ke daftar **Allow WebRequest for listed URL**. Alamat itu menjadi default `InpWebsiteServerURL`; perbarui jika domain website berubah.
 3. Compile `mt5/EA Scalper.mq5` di MetaEditor, salin `EA Scalper.ex5` ke `MQL5/Experts`, lalu pasang EA pada chart instrumen yang ingin diperdagangkan.
 4. Di input EA, isi `InpWebsiteApiKey` dengan nilai `EA_API_KEY`, aktifkan `InpEnableWebsiteSync`, dan pastikan URL sama dengan alamat yang diizinkan pada langkah sebelumnya.
 
-EA mengirim heartbeat, posisi terbuka, dan hasil posisi tertutup. Dashboard admin mencatatnya pada grup **EA Scalper (magic number)**, termasuk riwayat trade, win/loss, winrate, dan profit. Laporan close menggabungkan profit, komisi, swap, dan fee dari history MT5. Jika sinkronisasi gagal sementara, EA mencoba lagi pada siklus berikutnya; hasil close yang sudah diterima tidak dihitung dua kali.
+EA mengirim heartbeat, posisi terbuka, dan hasil posisi tertutup. Dashboard memiliki grafik EA Scalper dan status koneksi yang terpisah dari statistik grup Telegram. Riwayat trade dan log mencantumkan sumber, tanpa membuat signal Telegram sintetis. Laporan close menggabungkan profit, komisi, swap, dan fee dari history MT5. Jika sinkronisasi gagal sementara, EA mencoba lagi pada siklus berikutnya; hasil close yang sudah diterima tidak dihitung dua kali.
 
 ## Copy posisi dari akun utama ke akun follower
 

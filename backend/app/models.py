@@ -69,6 +69,46 @@ class Trade(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ScalperTrade(Base):
+    __tablename__ = "scalper_trades"
+    __table_args__ = (
+        UniqueConstraint("ticket", name="ux_scalper_trades_ticket"),
+        Index("ix_scalper_trades_opened_at", "opened_at"),
+        Index("ix_scalper_trades_magic_closed", "magic", "closed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticket: Mapped[str] = mapped_column(String(128), nullable=False)
+    position_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_ref: Mapped[str] = mapped_column(String(16), nullable=False)
+    terminal_login: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    terminal_server: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    magic: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    lots: Mapped[float] = mapped_column(Float, nullable=False)
+    entry: Mapped[float] = mapped_column(Float, nullable=False)
+    sl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tp: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    profit: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    result: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ScalperEAStatus(Base):
+    __tablename__ = "scalper_ea_status"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terminal_login: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    terminal_server: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    magic: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
 class ChatGroup(Base):
     __tablename__ = "groups"
 

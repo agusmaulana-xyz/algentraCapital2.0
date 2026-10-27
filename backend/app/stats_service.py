@@ -4,10 +4,10 @@ from typing import Any
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .models import ClientUser, EAStatus, Signal, Trade
+from .models import ClientUser, EAStatus, ScalperEAStatus, ScalperTrade, Signal, Trade
 from .time_utils import as_utc, wib_iso
 
 
@@ -35,9 +35,15 @@ def calculate_trade_stats(trades: Iterable[Any]) -> dict[str, int | float]:
 
 
 def get_dashboard_stats(db: Session) -> dict[str, int | float]:
-    signal_rows = db.execute(select(Signal.status)).scalars().all()
+    telegram_signal = or_(Signal.group_id.is_(None), ~Signal.group_id.like("ea-scalper:%"))
+    signal_rows = db.execute(select(Signal.status).where(telegram_signal)).scalars().all()
     status_counts = Counter(status.upper() for status in signal_rows)
-    trade_stats = calculate_trade_stats(db.execute(select(Trade)).scalars())
+    telegram_trades = db.execute(
+        select(Trade)
+        .outerjoin(Signal, Signal.id == Trade.signal_id)
+        .where(or_(Signal.id.is_(None), Signal.group_id.is_(None), ~Signal.group_id.like("ea-scalper:%")))
+    ).scalars()
+    trade_stats = calculate_trade_stats(telegram_trades)
     active_clients = db.execute(select(func.count(ClientUser.id))).scalar_one()
     ea = db.get(EAStatus, 1)
     heartbeat = ea.last_heartbeat if ea else None
@@ -60,13 +66,16 @@ def get_dashboard_stats(db: Session) -> dict[str, int | float]:
 
 
 def get_group_stats(db: Session) -> list[dict[str, int | float | str | None]]:
+    telegram_signal = or_(Signal.group_id.is_(None), ~Signal.group_id.like("ea-scalper:%"))
     signal_counts = db.execute(
         select(Signal.group_id, Signal.group_name, func.count(Signal.id))
+        .where(telegram_signal)
         .group_by(Signal.group_id, Signal.group_name)
     ).all()
     trades = db.execute(
         select(Signal.group_id, Trade.result, Trade.profit)
         .join(Trade, Trade.signal_id == Signal.id)
+        .where(telegram_signal)
     ).all()
     grouped: dict[str | None, dict[str, float | int]] = {}
     for group_id, result, profit in trades:
@@ -92,3 +101,74 @@ def get_group_stats(db: Session) -> list[dict[str, int | float | str | None]]:
             "profit": round(float(stats["profit"]), 2),
         })
     return sorted(output, key=lambda row: row["signals_total"], reverse=True)
+
+
+def get_scalper_stats(db: Session) -> dict[str, Any]:
+    status = db.get(ScalperEAStatus, 1)
+    heartbeat = as_utc(status.last_heartbeat) if status and status.last_heartbeat else None
+    now = datetime.now(timezone.utc)
+    online = bool(status and status.active and heartbeat and (now - heartbeat).total_seconds() <= 90)
+    trades = db.execute(
+        select(ScalperTrade).order_by(ScalperTrade.opened_at.desc(), ScalperTrade.id.desc())
+    ).scalars().all()
+
+    grouped: dict[int, dict[str, int | float]] = {}
+    totals: dict[str, int | float] = {
+        "trades_total": 0,
+        "closed_trades": 0,
+        "open_positions": 0,
+        "wins": 0,
+        "losses": 0,
+        "break_even": 0,
+        "profit": 0.0,
+    }
+    for trade in trades:
+        group = grouped.setdefault(trade.magic, {
+            "trades_total": 0,
+            "closed_trades": 0,
+            "open_positions": 0,
+            "wins": 0,
+            "losses": 0,
+            "break_even": 0,
+            "profit": 0.0,
+        })
+        for stats in (group, totals):
+            stats["trades_total"] = int(stats["trades_total"]) + 1
+            if trade.closed_at is None:
+                stats["open_positions"] = int(stats["open_positions"]) + 1
+            else:
+                stats["closed_trades"] = int(stats["closed_trades"]) + 1
+                stats["profit"] = float(stats["profit"]) + trade.profit
+                if trade.result == "WIN":
+                    stats["wins"] = int(stats["wins"]) + 1
+                elif trade.result == "LOSS":
+                    stats["losses"] = int(stats["losses"]) + 1
+                elif trade.result == "BE":
+                    stats["break_even"] = int(stats["break_even"]) + 1
+
+    groups = []
+    for magic, stats in sorted(grouped.items()):
+        decided = int(stats["wins"]) + int(stats["losses"])
+        groups.append({
+            "group_id": f"ea-scalper:{magic}",
+            "group_name": f"EA Scalper ({magic})",
+            **stats,
+            "winrate": round(int(stats["wins"]) / decided * 100, 2) if decided else 0.0,
+            "profit": round(float(stats["profit"]), 2),
+        })
+
+    total_decided = int(totals["wins"]) + int(totals["losses"])
+    return {
+        **totals,
+        "wins": int(totals["wins"]),
+        "losses": int(totals["losses"]),
+        "break_even": int(totals["break_even"]),
+        "profit": round(float(totals["profit"]), 2),
+        "winrate": round(int(totals["wins"]) / total_decided * 100, 2) if total_decided else 0.0,
+        "ea_online": online,
+        "ea_last_heartbeat": wib_iso(heartbeat),
+        "ea_symbol": status.symbol if status else None,
+        "ea_magic": status.magic if status else None,
+        "ea_version": status.version if status else None,
+        "groups": groups,
+    }

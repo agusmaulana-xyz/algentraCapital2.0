@@ -9,10 +9,11 @@
 //| CHANGELOG.md di folder project ini.                              |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.20"
+#property version   "3.30"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
+#define MAX_ACTIVE_POSITIONS 1
 
 input group "=== General ==="
 input long   InpMagicNumber       = 990022;
@@ -45,19 +46,11 @@ input double InpMaxDailyLossPercent = 10.0;   // batas rugi harian (%) sebelum E
 input double InpMaxLotSize        = 5.0;
 input double InpMaxDailyProfitPercent = 0.0;    // target profit harian (%) (0 = nonaktif)
 input int    InpMaxTradesPerDay   = 0;       // batas jumlah sinyal/trade per hari saat mode Default (0 = tanpa batas)
-input int    InpMaxOpenPositions  = 6;       // HARD CAP posisi aktif EA; sinyal baru ditahan kalau tercapai
 
 input group "=== SL Anti-Stophunt (SL lebih tahan noise, TP tidak ikut melebar) ==="
 input double InpSLNoiseBufferATR    = 0.35;   // buffer tambahan (x ATR) di atas SL dasar, meredam wick/noise M1
 input double InpSLSpreadBufferMult  = 1.5;    // buffer tambahan = spread saat ini x nilai ini, ditambah ke SL
 input bool   InpDecoupleTPFromSL    = true;   // true = TP dihitung dari SL DASAR (sebelum buffer), SL boleh lebih lebar tanpa TP ikut menjauh
-input bool   InpEnableBreakEven     = true;   // pindahkan SL ke breakeven+buffer setelah profit floating cukup
-input double InpBreakEvenTriggerRR  = 1.0;    // ambang trigger breakeven, dalam kelipatan SL DASAR (bukan SL lebar aktual).
-                                               // Jika target TP dipilih lebih tinggi, BE bisa mengunci profit sebelum harga berbalik.
-input double InpBreakEvenBufferPoints = 100;  // SL breakeven digeser sejauh ini (poin) dari harga entry, searah profit
-input double InpBreakEvenSpreadBufferMult = 3.0; // buffer breakeven = spread SAAT itu x nilai ini (dibuat lebih besar dari
-                                                   // InpSLSpreadBufferMult supaya tetap tahan kalau spread melebar mendadak
-                                                   // - mis. spike harga cepat - di antara saat BE di-set dan saat SL tersentuh)
 
 input group "=== Single entry TP target ==="
 enum ENUM_SCALPER_TP_TARGET
@@ -119,7 +112,7 @@ input int    InpCommandPollIntervalSec = 5;
 
 input group "=== Website trade synchronization ==="
 input bool   InpEnableWebsiteSync = true;
-input string InpWebsiteServerURL  = "http://127.0.0.1:8000";
+input string InpWebsiteServerURL  = "https://algentracapital.my.id";
 input string InpWebsiteApiKey     = "";      // isi dengan EA_API_KEY dari backend; tidak ditanam di file
 input int    InpWebsiteSyncIntervalSec = 15;
 input int    InpWebsiteHistoryLookbackDays = 90;
@@ -253,7 +246,7 @@ int CountOurPositions()
    for(int i=PositionsTotal()-1;i>=0;i--)
      {
       ulong ticket=PositionGetTicket(i);
-      if(ticket>0 && PositionSelectByTicket(ticket) && PositionGetString(POSITION_SYMBOL)==_Symbol && PositionGetInteger(POSITION_MAGIC)==InpMagicNumber) count++;
+      if(ticket>0 && PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC)==InpMagicNumber) count++;
      }
    return count;
   }
@@ -436,9 +429,9 @@ bool SendWebsiteTradeReport(string event,long positionId,string symbol,string ac
 void SendWebsiteHeartbeat()
   {
    string body=StringFormat(
-      "{\"active\":true,\"version\":\"EA Scalper 3.20\",\"symbol\":\"%s\",\"terminal\":\"%s\"}",
-      JsonEscape(_Symbol),JsonEscape(AccountInfoString(ACCOUNT_SERVER)));
-   WebsiteHttpPost("/api/ea/heartbeat",body);
+      "{\"active\":true,\"terminal_login\":\"%I64d\",\"terminal_server\":\"%s\",\"version\":\"EA Scalper 3.30\",\"symbol\":\"%s\",\"magic\":%I64d}",
+      AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),JsonEscape(_Symbol),InpMagicNumber);
+   WebsiteHttpPost("/api/ea/scalper/heartbeat",body);
   }
 
 bool FindWebsiteOpenPosition(long positionId,string &symbol,string &action,double &lots,
@@ -936,75 +929,6 @@ void OpenSingleEntry(int trend,double atr,string reason,string signalMode="BREAK
    SetScanState("POSITION_OPENED",StringFormat("%s; satu order lot %.2f; target %.2fR; %s",lastSignal,volume,tpRR,reason));
   }
 
-// ======================== BREAKEVEN / PROTEKSI PROFIT ========================
-// Setelah profit floating suatu posisi >= InpBreakEvenTriggerRR x SL DASAR (ATR x InpAtrSLMultiplier
-// dihitung ulang dari ATR terkini), SL posisi digeser ke breakeven + buffer. Ini melindungi
-// posisi dengan target lebih jauh supaya tidak balik jadi rugi karena SL dasar sudah dilebarkan.
-void ManageBreakEven()
-  {
-   if(!InpEnableBreakEven) return;
-   double atr=GetBufferValue(hAtr);
-   if(atr<=0) return;
-   double baseSLDist=atr*InpAtrSLMultiplier;
-   double triggerDist=baseSLDist*InpBreakEvenTriggerRR;
-   if(triggerDist<=0) return;
-   MqlTick tick; if(!SymbolInfoTick(_Symbol,tick)) return;
-
-   // --- FIX v3.06: buffer breakeven wajib menutup spread & lolos min stop-level broker ---
-   // Sebelumnya bufferPrice cuma InpBreakEvenBufferPoints*_Point tanpa cek apapun.
-   // Di broker dgn quote presisi tinggi (_Point kecil) atau spread saat ini lebih
-   // besar dari buffer, PositionModify() ditolak broker (invalid stops) -> SL lama
-   // (masih di sisi rugi) tetap terpasang, dan EA tidak pernah tahu karena return
-   // value-nya tidak dicek. Ini yang bikin sebagian posisi "breakeven lock"-nya
-   // gagal kepasang dengan benar.
-   long   stopLevelPts=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
-   long   freezeLevelPts=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
-   double minDist=(double)MathMax(stopLevelPts,freezeLevelPts)*_Point;
-   double spreadPrice=tick.ask-tick.bid;
-   double bufferPrice=MathMax(InpBreakEvenBufferPoints*_Point, spreadPrice*InpBreakEvenSpreadBufferMult);
-   bufferPrice=MathMax(bufferPrice, minDist+_Point);
-
-   for(int i=PositionsTotal()-1;i>=0;i--)
-     {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol || PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-      long type=PositionGetInteger(POSITION_TYPE);
-      double openPrice=PositionGetDouble(POSITION_PRICE_OPEN);
-      double curSL=PositionGetDouble(POSITION_SL);
-      double curTP=PositionGetDouble(POSITION_TP);
-
-      if(type==POSITION_TYPE_BUY)
-        {
-         double profitDist=tick.bid-openPrice;
-         if(profitDist<triggerDist) continue;
-         double newSL=NormalizeDouble(openPrice+bufferPrice,_Digits);
-         // pastikan jarak newSL ke harga skrg tidak melanggar stop-level broker
-         if(tick.bid-newSL<minDist) newSL=NormalizeDouble(tick.bid-minDist-_Point,_Digits);
-         if(newSL<=openPrice) continue; // kepepet minDist sampai di bawah open -> batalkan, jangan pasang SL yg jadi rugi
-         if(curSL>0 && curSL>=newSL) continue; // sudah di breakeven/lebih baik, jangan digeser mundur
-         if(!trade.PositionModify(ticket,newSL,curTP))
-            AppendEvent("BREAK_EVEN_FAILED",StringFormat("ticket %I64u BUY: gagal geser SL ke %.2f (retcode %d, %s)",ticket,newSL,trade.ResultRetcode(),trade.ResultComment()));
-         else
-            AppendEvent("BREAK_EVEN",StringFormat("ticket %I64u BUY: SL digeser ke breakeven+buffer %.2f",ticket,newSL));
-        }
-      else if(type==POSITION_TYPE_SELL)
-        {
-         double profitDist=openPrice-tick.ask;
-         if(profitDist<triggerDist) continue;
-         double newSL=NormalizeDouble(openPrice-bufferPrice,_Digits);
-         // pastikan jarak newSL ke harga skrg tidak melanggar stop-level broker
-         if(newSL-tick.ask<minDist) newSL=NormalizeDouble(tick.ask+minDist+_Point,_Digits);
-         if(newSL>=openPrice) continue; // kepepet minDist sampai di atas open -> batalkan, jangan pasang SL yg jadi rugi
-         if(curSL>0 && curSL<=newSL) continue; // sudah di breakeven/lebih baik, jangan digeser mundur
-         if(!trade.PositionModify(ticket,newSL,curTP))
-            AppendEvent("BREAK_EVEN_FAILED",StringFormat("ticket %I64u SELL: gagal geser SL ke %.2f (retcode %d, %s)",ticket,newSL,trade.ResultRetcode(),trade.ResultComment()));
-         else
-            AppendEvent("BREAK_EVEN",StringFormat("ticket %I64u SELL: SL digeser ke breakeven+buffer %.2f",ticket,newSL));
-        }
-     }
-  }
-
 void TryEntry()
   {
    if(halted) { SetScanState("HALTED",haltReason); return; }
@@ -1130,13 +1054,12 @@ void TryEntry()
       AppendEvent("POSITION_REVERSED",StringFormat("Tutup posisi %s, buka %s baru (%s)",PositionTypeLabel(posType),signalDir==1?"BUY":"SELL",signalMode));
      }
 
-   // --- HARD CAP: jangan biarkan posisi aktif melebihi InpMaxOpenPositions ---
-   // Dicek SETELAH reversal (kalau reversal, posisi lawan arah sudah ditutup di atas, jadi count sudah turun).
-   // Kalau bukan reversal (nambah signal baru) & sudah di cap, tahan sinyal - jangan buka posisi baru sama sekali.
+   // --- HARD CAP: hanya satu posisi aktif untuk magic number EA Scalper ---
+   // Dicek setelah reversal. Sinyal baru selain reversal menunggu posisi sebelumnya ditutup.
    int posCountNow=CountOurPositions();
-   if(posCountNow>=InpMaxOpenPositions)
+   if(posCountNow>=MAX_ACTIVE_POSITIONS)
      {
-      SetScanState("MAX_POSITIONS_REACHED",StringFormat("Sudah %d/%d posisi aktif, sinyal %s %s ditahan",posCountNow,InpMaxOpenPositions,signalDir==1?"BUY":"SELL",signalMode));
+      SetScanState("POSITION_ALREADY_OPEN",StringFormat("Sudah ada posisi EA Scalper aktif (%d/%d); sinyal %s %s menunggu posisi ditutup",posCountNow,MAX_ACTIVE_POSITIONS,signalDir==1?"BUY":"SELL",signalMode));
       return;
      }
 
@@ -1155,7 +1078,6 @@ int OnInit()
    if(InpMaxSpreadATRPercent<=0 || InpMaxSpreadPointsHardCap<=0) return INIT_PARAMETERS_INCORRECT;
    if(InpMaxDailyLossPercent<=0 || InpMaxLotSize<=0) return INIT_PARAMETERS_INCORRECT;
    if(InpMaxDailyProfitPercent<0 || InpMaxTradesPerDay<0) return INIT_PARAMETERS_INCORRECT;
-   if(InpMaxOpenPositions<=0) return INIT_PARAMETERS_INCORRECT;
    if(InpCommandPollIntervalSec<=0) return INIT_PARAMETERS_INCORRECT;
    if(InpWebsiteSyncIntervalSec<=0 || InpWebsiteHistoryLookbackDays<1) return INIT_PARAMETERS_INCORRECT;
    if(InpDeviationPoints<0) return INIT_PARAMETERS_INCORRECT;
@@ -1177,7 +1099,6 @@ int OnInit()
    if(InpMomentumMinBodyATR<=0 || InpMomentumConfirmBars<1) return INIT_PARAMETERS_INCORRECT;
 
    if(InpSLNoiseBufferATR<0 || InpSLSpreadBufferMult<0) return INIT_PARAMETERS_INCORRECT;
-   if(InpEnableBreakEven && (InpBreakEvenTriggerRR<=0 || InpBreakEvenBufferPoints<0 || InpBreakEvenSpreadBufferMult<0)) return INIT_PARAMETERS_INCORRECT;
    if(SelectedTakeProfitRR()<=0) return INIT_PARAMETERS_INCORRECT;
 
    SymbolSelect(_Symbol,true);
@@ -1225,7 +1146,6 @@ void OnTick()
       if(bid>0) GetNearestSR(bid,lastResistance,lastSupport);
      }
    WriteStatus();
-   ManageBreakEven();
    if(dayStartEquity>0 && (AccountInfoDouble(ACCOUNT_EQUITY)-dayStartEquity)/dayStartEquity*100.0<=-InpMaxDailyLossPercent)
      { halted=true; haltReason=StringFormat("Daily loss limit %.2f%% tercapai",InpMaxDailyLossPercent); SetScanState("HALTED",haltReason); return; }
    if(InpMaxDailyProfitPercent>0 && dayStartEquity>0 && (AccountInfoDouble(ACCOUNT_EQUITY)-dayStartEquity)/dayStartEquity*100.0>=InpMaxDailyProfitPercent)

@@ -34,13 +34,14 @@
     </div>
 
     <section>
-      <h2>Signal terbaru</h2>
-      <p class="section-help">Lima pesan terbaru beserta hasil parsing, confidence, status pemrosesan, dan ticket order.</p>
+      <h2>Signal Telegram terbaru</h2>
+      <p class="section-help">Lima pesan Telegram terbaru beserta hasil parsing, confidence, status pemrosesan, dan ticket order.</p>
       <div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Grup</th><th>Pesan</th><th>Parsing</th><th>Confidence</th><th>Status</th><th>Ticket</th><th>Profit</th></tr></thead><tbody id="signals-table"></tbody></table></div>
     </section>
 
     <div class="grid">
-      <section><h2>Win dan loss per grup</h2><p class="section-help">Bandingkan akurasi dan profit dari setiap grup sumber.</p><canvas id="group-chart" height="180"></canvas><div class="table-wrap"><table><thead><tr><th>Grup</th><th>Signal</th><th>Win</th><th>Loss</th><th>Winrate</th><th>Profit</th></tr></thead><tbody id="groups-table"></tbody></table></div></section>
+      <section><h2>Win dan loss per grup Telegram</h2><p class="section-help">Akurasi dan profit signal dari tiap grup Telegram.</p><canvas id="group-chart" height="180"></canvas><div class="table-wrap"><table><thead><tr><th>Grup</th><th>Signal</th><th>Win</th><th>Loss</th><th>Winrate</th><th>Profit</th></tr></thead><tbody id="groups-table"></tbody></table></div></section>
+      <section><h2>Win dan loss EA Scalper</h2><p id="scalper-status" class="section-help" role="status">Memuat status EA Scalper...</p><p id="scalper-summary" class="muted"></p><canvas id="scalper-chart" height="180"></canvas><div class="table-wrap"><table><thead><tr><th>EA</th><th>Entry</th><th>Terbuka</th><th>Win</th><th>Loss</th><th>BE</th><th>Winrate</th><th>Profit</th></tr></thead><tbody id="scalper-table"></tbody></table></div></section>
       <section><h2>Profit kumulatif</h2><p class="section-help">Perubahan profit terealisasi dari waktu ke waktu.</p><canvas id="profit-chart" height="220"></canvas></section>
     </div>
 
@@ -54,8 +55,8 @@
     <section>
       <h2>Riwayat trade</h2>
       <p class="section-help">Filter transaksi yang telah dilaporkan EA menurut tanggal, grup, simbol, atau hasil; unduh CSV untuk analisis.</p>
-      <div class="toolbar"><input type="date" id="date-from" title="Tanggal awal trade"><input type="date" id="date-to" title="Tanggal akhir trade"><input id="trade-group" placeholder="Group ID" title="Filter berdasarkan ID grup Telegram"><input id="trade-symbol" placeholder="Symbol" title="Filter berdasarkan simbol"><select id="trade-result" title="Filter hasil trade"><option value="">Semua hasil</option><option>WIN</option><option>LOSS</option><option>BE</option></select><button id="filter-trades">Filter trade</button><a id="trades-export" href="/api/trades/export.csv">Export CSV</a></div>
-      <div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Grup</th><th>Ticket</th><th>Symbol</th><th>Arah</th><th>Lot</th><th>Entry</th><th>Profit</th><th>Hasil</th></tr></thead><tbody id="trades-table"></tbody></table></div>
+      <div class="toolbar"><input type="date" id="date-from" title="Tanggal awal trade"><input type="date" id="date-to" title="Tanggal akhir trade"><input id="trade-group" placeholder="Group ID / EA Scalper magic" title="Filter grup Telegram atau ID ea-scalper:MAGIC"><input id="trade-symbol" placeholder="Symbol" title="Filter berdasarkan simbol"><select id="trade-result" title="Filter hasil trade"><option value="">Semua hasil</option><option>WIN</option><option>LOSS</option><option>BE</option></select><button id="filter-trades">Filter trade</button><a id="trades-export" href="/api/trades/export.csv">Export CSV</a></div>
+      <div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Sumber</th><th>Grup / EA</th><th>Ticket</th><th>Symbol</th><th>Arah</th><th>Lot</th><th>Entry</th><th>Profit</th><th>Hasil</th></tr></thead><tbody id="trades-table"></tbody></table></div>
     </section>
 
     <section id="settings">
@@ -88,7 +89,7 @@
 <script nonce="{{ request.state.csp_nonce }}">
 const $ = (selector) => document.querySelector(selector);
     if (typeof Chart !== "undefined") { Chart.defaults.color = "#9bb0c2"; Chart.defaults.borderColor = "#253c50"; }
-    let groupChart = null, profitChart = null;
+    let groupChart = null, scalperChart = null, profitChart = null;
     const displayTime = (value) => value ? new Date(value).toLocaleString("id-ID", {timeZone:"Asia/Jakarta"}) : "—";
     const draw = (selector, columns, rows) => {
       const body = $(selector); body.replaceChildren();
@@ -141,6 +142,27 @@ const $ = (selector) => document.querySelector(selector);
       if (groupChart) { groupChart.data=data; groupChart.update(); }
       else groupChart = new Chart($("#group-chart"), {type:"bar",data,options:{responsive:true,scales:{y:{beginAtZero:true}}}});
     }
+    async function loadScalperStats() {
+      const stats = await api("/api/scalper/stats");
+      const heartbeat = stats.ea_last_heartbeat ? displayTime(stats.ea_last_heartbeat) : "belum pernah terhubung";
+      const account = stats.ea_symbol ? ` · ${stats.ea_symbol} · magic ${stats.ea_magic}` : "";
+      $("#scalper-status").textContent = stats.ea_online
+        ? `EA Scalper ONLINE · heartbeat ${heartbeat}${account}`
+        : `EA Scalper OFFLINE · heartbeat ${heartbeat}${account}. Periksa ServerURL, API key, dan izin WebRequest di MT5.`;
+      $("#scalper-summary").textContent = `Entry ${stats.trades_total} · posisi terbuka ${stats.open_positions} · win ${stats.wins} · loss ${stats.losses} · BE ${stats.break_even} · profit ${Number(stats.profit).toFixed(2)}`;
+      const groups = stats.groups || [];
+      draw("#scalper-table", ["group_name","trades_total","open_positions","wins","losses","break_even","winrate","profit"], groups.map((g) => ({...g, winrate:`${g.winrate}%`, profit:Number(g.profit).toFixed(2)})));
+      if (typeof Chart === "undefined") return;
+      const data = {
+        labels: groups.map((g) => g.group_name),
+        datasets: [
+          {label:"Win",data:groups.map((g)=>g.wins),backgroundColor:"#1f9d72"},
+          {label:"Loss",data:groups.map((g)=>g.losses),backgroundColor:"#d85858"}
+        ]
+      };
+      if (scalperChart) { scalperChart.data=data; scalperChart.update(); }
+      else scalperChart = new Chart($("#scalper-chart"), {type:"bar",data,options:{responsive:true,scales:{y:{beginAtZero:true,precision:0}}}});
+    }
     async function loadLogs() {
       const values = {level:$("#log-level").value,search:$("#log-search").value};
       const logs = await api(queryWithFilters("/api/logs", {...values,limit:5}));
@@ -154,12 +176,20 @@ const $ = (selector) => document.querySelector(selector);
         group_id:$("#trade-group").value,symbol:$("#trade-symbol").value,result:$("#trade-result").value
       };
       const trades = await api(queryWithFilters("/api/trades", {...values,limit:100}));
-      draw("#trades-table", ["opened_at","group_name","ticket","symbol","action","lots","entry","profit","result"], trades.map((t)=>({...t,opened_at:displayTime(t.opened_at),lots:t.lots==null?"—":t.lots,entry:t.entry==null?"—":t.entry,profit:Number(t.profit).toFixed(2)})));
+      draw("#trades-table", ["opened_at","source","group_name","ticket","symbol","action","lots","entry","profit","result"], trades.map((t)=>({...t,opened_at:displayTime(t.opened_at),lots:t.lots==null?"—":t.lots,entry:t.entry==null?"—":t.entry,profit:Number(t.profit).toFixed(2)})));
       $("#trades-export").href = queryWithFilters("/api/trades/export.csv", values);
       if (typeof Chart === "undefined") return;
       const closed=trades.filter((t)=>t.closed_at).sort((a,b)=>new Date(a.closed_at)-new Date(b.closed_at));
-      let total=0; const points=closed.map((t)=>({x:displayTime(t.closed_at),y:(total+=Number(t.profit))}));
-      const data={labels:points.map(p=>p.x),datasets:[{label:"Profit kumulatif",data:points.map(p=>p.y),borderColor:"#2458d3",tension:.2}]};
+      let telegramTotal=0, scalperTotal=0;
+      const labels=[], telegramValues=[], scalperValues=[];
+      for(const trade of closed){
+        if(trade.source==="EA Scalper") scalperTotal+=Number(trade.profit); else telegramTotal+=Number(trade.profit);
+        labels.push(displayTime(trade.closed_at)); telegramValues.push(telegramTotal); scalperValues.push(scalperTotal);
+      }
+      const data={labels,datasets:[
+        {label:"Telegram",data:telegramValues,borderColor:"#2458d3",tension:.2},
+        {label:"EA Scalper",data:scalperValues,borderColor:"#f0a44b",tension:.2}
+      ]};
       if(profitChart){profitChart.data=data;profitChart.update();}
       else profitChart=new Chart($("#profit-chart"),{type:"line",data,options:{responsive:true,scales:{y:{beginAtZero:false}}}});
     }
@@ -199,7 +229,7 @@ const $ = (selector) => document.querySelector(selector);
       catch(_) {}
     },10000);
     async function refresh() {
-      try { await Promise.all([loadStatsAndSignals(),loadGroups(),loadLogs(),loadTrades()]); }
+      try { await Promise.all([loadStatsAndSignals(),loadGroups(),loadScalperStats(),loadLogs(),loadTrades()]); }
       catch(error) { $("#connection").textContent=`Gagal memuat: ${error.message}`; }
     }
     $("#filter-logs").addEventListener("click",loadLogs);

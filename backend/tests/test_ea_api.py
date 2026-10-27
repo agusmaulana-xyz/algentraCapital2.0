@@ -5,8 +5,8 @@ from fastapi.testclient import TestClient
 
 from app.database import SessionLocal
 from app.gemini_parser import SignalClassification
-from app.main import app
-from app.models import AppSetting, EAExecution, EAStatus, Signal, Trade, utc_now
+from app.main import app, migrate_legacy_scalper_trades
+from app.models import AppSetting, EAExecution, EAStatus, ScalperEAStatus, ScalperTrade, Signal, SystemLog, Trade, utc_now
 
 
 API_KEY = "m4-test-ea-api-key-32-characters-long"
@@ -24,6 +24,137 @@ def parsed_signal(symbol="XAUUSD"):
         is_signal=True, type="NEW_SIGNAL", action="BUY", order_type="MARKET", symbol=symbol,
         entry=None, tp=[2450.0], sl=2400.0, confidence=0.95, reason="test",
     ).model_dump_json()
+
+
+def test_scalper_reports_are_separate_and_visible_in_admin_history():
+    headers = {"X-API-Key": API_KEY}
+    common = {
+        "position_id": "765432109",
+        "terminal_login": "12345678",
+        "terminal_server": "Broker-Demo",
+        "magic": 990022,
+        "symbol": "XAUUSD",
+        "action": "BUY",
+        "lots": 0.01,
+        "price": 2450.25,
+        "sl": 2440.0,
+        "tp": 2472.0,
+        "profit": 0.0,
+    }
+
+    try:
+        with TestClient(app) as client:
+            heartbeat = client.post("/api/ea/scalper/heartbeat", headers=headers, json={
+                "active": True,
+                "terminal_login": common["terminal_login"],
+                "terminal_server": common["terminal_server"],
+                "version": "EA Scalper 3.30",
+                "symbol": common["symbol"],
+                "magic": common["magic"],
+            })
+            assert heartbeat.status_code == 200
+
+            opened = client.post("/api/ea/scalper/trade", headers=headers, json={**common, "event": "OPEN"})
+            assert opened.status_code == 200
+            duplicate_open = client.post("/api/ea/scalper/trade", headers=headers, json={**common, "event": "OPEN"})
+            assert duplicate_open.status_code == 200
+            assert duplicate_open.json()["duplicate"] is True
+
+            closed = client.post("/api/ea/scalper/trade", headers=headers, json={
+                **common,
+                "event": "CLOSE",
+                "profit": 12.5,
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert closed.status_code == 200
+            duplicate_close = client.post("/api/ea/scalper/trade", headers=headers, json={
+                **common,
+                "event": "CLOSE",
+                "profit": 12.5,
+            })
+            assert duplicate_close.status_code == 200
+            assert duplicate_close.json()["duplicate"] is True
+
+            login = client.post("/api/auth/login", json={
+                "username": "admin",
+                "password": "M1-Testing-Password-123",
+            })
+            assert login.status_code == 200
+            stats = client.get("/api/scalper/stats")
+            assert stats.status_code == 200
+            assert stats.json()["ea_online"] is True
+            assert stats.json()["trades_total"] == 1
+            assert stats.json()["wins"] == 1
+            assert stats.json()["losses"] == 0
+            assert stats.json()["profit"] == 12.5
+
+            trades = client.get("/api/trades?group_id=ea-scalper:990022")
+            assert trades.status_code == 200
+            [trade] = trades.json()
+            assert trade["source"] == "EA Scalper"
+            assert trade["result"] == "WIN"
+            assert trade["group_name"] == "EA Scalper (990022)"
+            groups = client.get("/api/groups/stats").json()
+            assert all(not str(group.get("group_id", "")).startswith("ea-scalper:") for group in groups)
+            assert all(not item.get("group_name", "").startswith("EA Scalper") for item in client.get("/api/signals").json())
+            logs = client.get("/api/logs?search=765432109").json()
+            assert len(logs) == 2
+            assert all(item["source"] == "EA_SCALPER" for item in logs)
+            assert "EA Scalper" in client.get("/api/trades/export.csv").text
+    finally:
+        with SessionLocal() as db:
+            db.query(SystemLog).filter(
+                SystemLog.source == "EA_SCALPER",
+                SystemLog.message.contains("765432109"),
+            ).delete(synchronize_session=False)
+            db.query(ScalperTrade).filter_by(position_id="765432109").delete(synchronize_session=False)
+            db.query(ScalperEAStatus).filter_by(id=1).delete(synchronize_session=False)
+            db.commit()
+
+
+def test_legacy_scalper_trade_is_moved_out_of_telegram_signal_tables():
+    ticket = "SCALPER-112233445-abcdef123456"
+    with SessionLocal() as db:
+        signal = Signal(
+            group_id="ea-scalper:990022",
+            group_name="EA Scalper (990022)",
+            raw_text="EA Scalper BUY XAUUSD",
+            status="WIN",
+            created_at=utc_now(),
+        )
+        db.add(signal)
+        db.flush()
+        db.add(Trade(
+            signal_id=signal.id,
+            ticket=ticket,
+            symbol="XAUUSD",
+            action="BUY",
+            lots=0.01,
+            entry=2450.0,
+            tp="[2472.0]",
+            exec_price=2450.0,
+            profit=12.0,
+            result="WIN",
+            opened_at=utc_now(),
+            closed_at=utc_now(),
+        ))
+        db.commit()
+        signal_id = signal.id
+
+    try:
+        with SessionLocal() as db:
+            migrate_legacy_scalper_trades(db)
+            migrated = db.query(ScalperTrade).filter_by(ticket=ticket).one()
+            assert migrated.magic == 990022
+            assert migrated.profit == 12.0
+            assert db.query(Trade).filter_by(ticket=ticket).one_or_none() is None
+            assert db.get(Signal, signal_id) is None
+    finally:
+        with SessionLocal() as db:
+            db.query(ScalperTrade).filter_by(ticket=ticket).delete(synchronize_session=False)
+            db.query(Trade).filter_by(ticket=ticket).delete(synchronize_session=False)
+            db.query(Signal).filter_by(id=signal_id).delete(synchronize_session=False)
+            db.commit()
 
 
 def test_ea_api_key_heartbeat_claim_report_and_trade_result():

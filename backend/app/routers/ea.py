@@ -24,6 +24,8 @@ from ..models import (
     MasterCopyState,
     MT5MasterAccountState,
     MT5MasterMarketState,
+    ScalperEAStatus,
+    ScalperTrade,
     Signal,
     SystemLog,
     Trade,
@@ -59,6 +61,15 @@ class ScalperTradeReport(BaseModel):
     closed_at: datetime | None = None
 
 
+class ScalperHeartbeatReport(BaseModel):
+    active: bool = True
+    terminal_login: str = Field(min_length=1, max_length=32, pattern=r"^\d+$")
+    terminal_server: str = Field(min_length=1, max_length=128)
+    version: str = Field(min_length=1, max_length=64)
+    symbol: str = Field(min_length=1, max_length=64)
+    magic: int = Field(ge=0, le=9223372036854775807)
+
+
 def require_ea_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
     configured = get_settings().ea_api_key
     if configured is None or not configured.get_secret_value():
@@ -73,68 +84,40 @@ def report_scalper_trade(payload: ScalperTradeReport, db: Session = Depends(get_
         f"{payload.terminal_login}@{payload.terminal_server}".casefold().encode("utf-8")
     ).hexdigest()[:12]
     ticket = f"SCALPER-{payload.position_id}-{account_ref}"
-    trade = db.execute(select(Trade).where(Trade.ticket == ticket)).scalar_one_or_none()
+    trade = db.execute(select(ScalperTrade).where(ScalperTrade.ticket == ticket)).scalar_one_or_none()
     if trade is not None and trade.closed_at is not None:
         return {"status": trade.result, "ticket": ticket, "duplicate": True}
 
     now = utc_now()
     is_new_trade = trade is None
     if is_new_trade:
-        group_id = f"ea-scalper:{payload.magic}"
-        group_name = f"EA Scalper ({payload.magic})"
-        signal = Signal(
-            group_id=group_id,
-            group_name=group_name,
-            raw_text=f"EA Scalper {payload.action} {payload.symbol} (magic {payload.magic})",
-            parsed_json=json.dumps({
-                "source": "EA_SCALPER",
-                "magic": payload.magic,
-                "symbol": payload.symbol,
-                "action": payload.action,
-                "position_id": payload.position_id,
-            }, ensure_ascii=False, allow_nan=False),
-            status="EXECUTED",
-            created_at=now,
-        )
-        db.add(signal)
-        db.flush()
-        trade = Trade(
-            signal_id=signal.id,
+        trade = ScalperTrade(
             ticket=ticket,
+            position_id=payload.position_id,
+            account_ref=account_ref,
+            terminal_login=payload.terminal_login,
+            terminal_server=payload.terminal_server,
+            magic=payload.magic,
             symbol=payload.symbol.upper(),
             action=payload.action,
             lots=payload.lots,
             entry=payload.price,
             sl=payload.sl,
             tp=json.dumps([payload.tp]) if payload.tp is not None else "[]",
-            exec_price=payload.price,
             opened_at=now,
         )
         db.add(trade)
     else:
-        signal = db.get(Signal, trade.signal_id) if trade.signal_id is not None else None
+        trade.lots = payload.lots
         trade.symbol = payload.symbol.upper()
         trade.action = payload.action
-        trade.lots = payload.lots
+        trade.terminal_login = payload.terminal_login
+        trade.terminal_server = payload.terminal_server
         if payload.event == "OPEN":
             trade.entry = payload.price
-            trade.exec_price = payload.price
             trade.sl = payload.sl if payload.sl is not None else trade.sl
             if payload.tp is not None:
                 trade.tp = json.dumps([payload.tp])
-
-    if signal is None:
-        signal = Signal(
-            group_id=f"ea-scalper:{payload.magic}",
-            group_name=f"EA Scalper ({payload.magic})",
-            raw_text=f"EA Scalper {payload.action} {payload.symbol} (magic {payload.magic})",
-            parsed_json=json.dumps({"source": "EA_SCALPER", "magic": payload.magic}, allow_nan=False),
-            status="EXECUTED",
-            created_at=now,
-        )
-        db.add(signal)
-        db.flush()
-        trade.signal_id = signal.id
 
     if payload.event == "CLOSE":
         closed_at = payload.closed_at or now
@@ -143,9 +126,6 @@ def report_scalper_trade(payload: ScalperTradeReport, db: Session = Depends(get_
         trade.profit = payload.profit
         trade.result = "WIN" if payload.profit > 0 else "LOSS" if payload.profit < 0 else "BE"
         trade.closed_at = closed_at
-        signal.status = trade.result
-    else:
-        signal.status = "EXECUTED"
 
     if not (not is_new_trade and payload.event == "OPEN"):
         description = (
@@ -160,16 +140,28 @@ def report_scalper_trade(payload: ScalperTradeReport, db: Session = Depends(get_
         ))
 
     db.commit()
-    if payload.event == "CLOSE" and public_performance_hub.connected:
-        live_payload = public_performance_payload(db, include_equity_curve=False)
-        live_payload["pnl_updated"] = True
-        public_performance_hub.publish(live_payload)
     return {
         "status": trade.result if payload.event == "CLOSE" else "EXECUTED",
-        "signal_id": trade.signal_id,
         "ticket": ticket,
         "duplicate": not is_new_trade and payload.event == "OPEN",
     }
+
+
+@router.post("/scalper/heartbeat", dependencies=[Depends(require_ea_key)])
+def scalper_heartbeat(payload: ScalperHeartbeatReport, db: Session = Depends(get_db)) -> dict[str, object]:
+    status = db.get(ScalperEAStatus, 1)
+    if status is None:
+        status = ScalperEAStatus(id=1)
+        db.add(status)
+    status.active = payload.active
+    status.last_heartbeat = utc_now()
+    status.terminal_login = payload.terminal_login
+    status.terminal_server = payload.terminal_server
+    status.version = payload.version
+    status.symbol = payload.symbol
+    status.magic = payload.magic
+    db.commit()
+    return {"status": "ok", "active": status.active, "last_heartbeat": wib_iso(status.last_heartbeat)}
 
 
 @router.post("/master/snapshot", dependencies=[Depends(require_ea_key)])
