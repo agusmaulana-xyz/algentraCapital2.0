@@ -9,7 +9,7 @@
 //| CHANGELOG.md di folder project ini.                              |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.30"
+#property version   "3.31"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -47,19 +47,24 @@ input double InpMaxLotSize        = 5.0;
 input double InpMaxDailyProfitPercent = 0.0;    // target profit harian (%) (0 = nonaktif)
 input int    InpMaxTradesPerDay   = 0;       // batas jumlah sinyal/trade per hari saat mode Default (0 = tanpa batas)
 
-input group "=== SL Anti-Stophunt (SL lebih tahan noise, TP tidak ikut melebar) ==="
+input group "=== Fixed points RR (default) / legacy adaptive RR ==="
+input bool   InpUseFixedPointRR     = true;  // aktif: SL/TP tetap 1000:2000 point; nonaktif: gunakan pengaturan ATR di bawah
+input double InpFixedSLPoints       = 1000;  // jarak SL tetap dalam point broker
+input double InpFixedTPPoints       = 2000;  // jarak TP tetap dalam point broker (wajib 2x SL)
+
+input group "=== Legacy ATR risk management (dipakai jika Fixed points RR nonaktif) ==="
 input double InpSLNoiseBufferATR    = 0.35;   // buffer tambahan (x ATR) di atas SL dasar, meredam wick/noise M1
 input double InpSLSpreadBufferMult  = 1.5;    // buffer tambahan = spread saat ini x nilai ini, ditambah ke SL
 input bool   InpDecoupleTPFromSL    = true;   // true = TP dihitung dari SL DASAR (sebelum buffer), SL boleh lebih lebar tanpa TP ikut menjauh
 
-input group "=== Single entry TP target ==="
+input group "=== Legacy single entry TP target (Fixed points RR nonaktif) ==="
 enum ENUM_SCALPER_TP_TARGET
   {
    SCALPER_TP1 = 1,
    SCALPER_TP2 = 2,
    SCALPER_TP3 = 3
   };
-input ENUM_SCALPER_TP_TARGET InpSingleEntryTarget = SCALPER_TP3; // tetap satu order, pilih satu target TP
+input ENUM_SCALPER_TP_TARGET InpSingleEntryTarget = SCALPER_TP3; // target legacy; fixed points RR selalu memakai TP 2000 point
 input double InpTP1_RR            = 0.8;     // target RR TP1
 input double InpTP2_RR            = 1.3;
 input double InpTP3_RR            = 2.2;     // target jauh untuk satu posisi penuh
@@ -872,10 +877,11 @@ void OpenSingleEntry(int trend,double atr,string reason,string signalMode="BREAK
    MqlTick tick; if(!SymbolInfoTick(_Symbol,tick)) { SetScanState("PRICE_UNAVAILABLE","Tick harga belum tersedia"); return; }
    double entry=(trend==1 ? tick.ask : tick.bid);
 
-   // ---- SL DASAR: dipakai sbg acuan TP (RR) & referensi trigger breakeven. TIDAK dikirim langsung ke broker. ----
-   double baseSLDistance=atr*InpAtrSLMultiplier;
+   // Fixed mode uses exact broker-point distances. ATR/SR stop adjustments and anti-noise
+   // buffers remain available in legacy mode, but would break the requested 1000:2000 RR.
+   double baseSLDistance=(InpUseFixedPointRR ? InpFixedSLPoints*_Point : atr*InpAtrSLMultiplier);
    double sl=(trend==1 ? entry-baseSLDistance : entry+baseSLDistance);
-   if(srInvalidationLevel>0)
+   if(!InpUseFixedPointRR && srInvalidationLevel>0)
      {
       // Untuk reversal S/R, SL minimal harus melewati level yg invalid-kan setup (+ buffer zona),
       // jangan sampai lebih rapat drpd itu walau ATR kecil.
@@ -883,27 +889,47 @@ void OpenSingleEntry(int trend,double atr,string reason,string signalMode="BREAK
       if(trend==1) sl=MathMin(sl,srInvalidationLevel-zoneWidth);
       else         sl=MathMax(sl,srInvalidationLevel+zoneWidth);
      }
-   baseSLDistance=MathAbs(entry-sl); // sinkronkan ulang kalau kena penyesuaian S/R di atas
+   if(!InpUseFixedPointRR)
+      baseSLDistance=MathAbs(entry-sl); // sinkronkan ulang kalau kena penyesuaian S/R di atas
 
-   // ---- SL AKTUAL: SL dasar + buffer anti-noise (ATR) + buffer spread real-time. ----
-   // Ini yang membuat SL tidak gampang tersentuh oleh wick M1 / pelebaran spread sesaat.
-   // TP TIDAK memakai jarak ini (lihat InpDecoupleTPFromSL di bawah), jadi TP tidak ikut menjauh.
    double spreadNow=MathMax(tick.ask-tick.bid,0);
-   double noiseBuffer=atr*InpSLNoiseBufferATR+spreadNow*InpSLSpreadBufferMult;
-   if(trend==1) sl-=noiseBuffer; else sl+=noiseBuffer;
+   if(!InpUseFixedPointRR)
+     {
+      // Legacy mode widens the SL against ATR noise and current spread.
+      double noiseBuffer=atr*InpSLNoiseBufferATR+spreadNow*InpSLSpreadBufferMult;
+      if(trend==1) sl-=noiseBuffer; else sl+=noiseBuffer;
+     }
 
-   sl=EnforceMinStopDistance(entry,sl,trend!=1);
+   if(InpUseFixedPointRR)
+     {
+      // Jangan geser level fixed secara diam-diam karena akan mengubah RR. Jika broker
+      // meminta jarak lebih besar dari level yang dipilih, tahan entry dan laporkan alasannya.
+      double spreadPoints=spreadNow/_Point;
+      double minStopPoints=(double)MathMax(SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
+                                           SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL));
+      double tightestBrokerDistance=MathMin(InpFixedSLPoints-spreadPoints,InpFixedTPPoints-spreadPoints);
+      if(tightestBrokerDistance<=minStopPoints)
+        {
+         string stopReason=StringFormat("Fixed RR %.0f:%.0f point tidak memenuhi batas broker (jarak minimum %.0f point)",
+                                        InpFixedSLPoints,InpFixedTPPoints,minStopPoints);
+         AppendEvent("ORDER_FAILED",stopReason);
+         SetScanState("FIXED_RR_STOP_DISTANCE",stopReason);
+         return;
+        }
+     }
+   else
+      sl=EnforceMinStopDistance(entry,sl,trend!=1);
    sl=NormalizeDouble(sl,_Digits);
    // Volume satu order selalu memakai lot tetap yang dinormalisasi ke aturan broker.
    double volume=NormalizeVolume(MathMin(InpFixedLot,InpMaxLotSize));
    if(volume<=0) { SetScanState("LOT_UNAVAILABLE","Lot tetap tidak memenuhi minimum/step broker"); return; }
 
-   // ---- Jarak acuan TP: pakai SL DASAR (sblm buffer) kalau InpDecoupleTPFromSL=true, biar TP tetap dekat/tidak ikut melebar ----
-   double tpBaseDistance=(InpDecoupleTPFromSL ? baseSLDistance : MathAbs(entry-sl));
-
-   double tpRR=SelectedTakeProfitRR();
-   double tp=(trend==1 ? entry+tpBaseDistance*tpRR : entry-tpBaseDistance*tpRR);
-   tp=EnforceMinStopDistance(entry,tp,trend==1);
+   double tpRR=(InpUseFixedPointRR ? 2.0 : SelectedTakeProfitRR());
+   double tpDistance=(InpUseFixedPointRR ? InpFixedTPPoints*_Point :
+                      (InpDecoupleTPFromSL ? baseSLDistance : MathAbs(entry-sl))*tpRR);
+   double tp=(trend==1 ? entry+tpDistance : entry-tpDistance);
+   if(!InpUseFixedPointRR)
+      tp=EnforceMinStopDistance(entry,tp,trend==1);
    tp=NormalizeDouble(tp,_Digits);
 
    trade.SetExpertMagicNumber(InpMagicNumber);
@@ -1068,8 +1094,17 @@ void TryEntry()
 
 int OnInit()
   {
-   if(InpRangeBars<2 || InpFixedLot<=0 || InpAtrSLMultiplier<=0) return INIT_PARAMETERS_INCORRECT;
-   if(InpTP1_RR<=0 || InpTP2_RR<=0 || InpTP3_RR<=0) return INIT_PARAMETERS_INCORRECT;
+   if(InpRangeBars<2 || InpFixedLot<=0) return INIT_PARAMETERS_INCORRECT;
+   if(InpUseFixedPointRR)
+     {
+      if(InpFixedSLPoints<=0 || InpFixedTPPoints<=0) return INIT_PARAMETERS_INCORRECT;
+      if(MathAbs(InpFixedTPPoints-2.0*InpFixedSLPoints)>0.0001) return INIT_PARAMETERS_INCORRECT;
+     }
+   else
+     {
+      if(InpAtrSLMultiplier<=0 || InpTP1_RR<=0 || InpTP2_RR<=0 || InpTP3_RR<=0)
+         return INIT_PARAMETERS_INCORRECT;
+     }
 
    if(InpTrendEmaFast<=0 || InpTrendEmaSlow<=0 || InpTrendEmaFast>=InpTrendEmaSlow)
       return INIT_PARAMETERS_INCORRECT;
@@ -1098,8 +1133,8 @@ int OnInit()
    if(InpM1TrendEmaFast<=0 || InpM1TrendEmaSlow<=0 || InpM1TrendEmaFast>=InpM1TrendEmaSlow) return INIT_PARAMETERS_INCORRECT;
    if(InpMomentumMinBodyATR<=0 || InpMomentumConfirmBars<1) return INIT_PARAMETERS_INCORRECT;
 
-   if(InpSLNoiseBufferATR<0 || InpSLSpreadBufferMult<0) return INIT_PARAMETERS_INCORRECT;
-   if(SelectedTakeProfitRR()<=0) return INIT_PARAMETERS_INCORRECT;
+   if(!InpUseFixedPointRR && (InpSLNoiseBufferATR<0 || InpSLSpreadBufferMult<0)) return INIT_PARAMETERS_INCORRECT;
+   if(!InpUseFixedPointRR && SelectedTakeProfitRR()<=0) return INIT_PARAMETERS_INCORRECT;
 
    SymbolSelect(_Symbol,true);
    hEmaFast=iMA(_Symbol,InpTrendTF,InpTrendEmaFast,0,MODE_EMA,PRICE_CLOSE);

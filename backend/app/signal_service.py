@@ -239,13 +239,12 @@ def validate_classification(
     if entry_low is not None and entry_high is not None:
         levels.append(f"ENTRY ZONE : {entry_low:g}–{entry_high:g}")
     elif entry is not None:
-        levels.append(f"{entry:g}")
+        levels.append(f"ENTRY : {entry:g}")
     elif classification.order_type == "MARKET":
         levels.append("MARKET")
-    if take_profits:
-        levels.append("TP : " + ", ".join(f"{price:g}" for price in take_profits))
     if stop_loss is not None:
         levels.append(f"SL : {stop_loss:g}")
+    levels.extend(f"TP{index} : {price:g}" for index, price in enumerate(take_profits, start=1))
     normalized = f"{action} : " + " | ".join(levels)
     return ValidationResult("PENDING", classification, symbol, normalized, "Signal valid")
 

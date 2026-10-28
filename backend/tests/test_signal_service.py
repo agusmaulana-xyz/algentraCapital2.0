@@ -64,7 +64,7 @@ def test_process_message_normalizes_persists_and_deduplicates():
 
         row = db.get(Signal, first.signal_id)
         assert first.status == "PENDING"
-        assert first.normalized_text == "BUY : 2400 | TP : 2420 | SL : 2380"
+        assert first.normalized_text == "BUY : ENTRY : 2400 | SL : 2380 | TP1 : 2420"
         assert row is not None and row.parsed_json is not None
         assert duplicate.duplicate is True
         assert duplicate.signal_id == first.signal_id
