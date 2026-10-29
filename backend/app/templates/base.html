@@ -4,8 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token|default('') }}">
-  <meta name="description" content="{% if request.session.get('admin_username') %}Algentra Capital menyediakan layanan copy trading XAUUSD dengan sistematisasi berbasis AI, transparansi, dan kontrol risiko.{% else %}Algentra Capital membantu membaca sinyal XAUUSD dengan AI, menjalankan instruksi melalui EA MetaTrader, dan menyalin posisi ke akun Copy Trading.{% endif %}">
+  <meta name="description" content="{% block meta_description %}{% if request.session.get('admin_username') %}Algentra Capital menyediakan layanan copy trading XAUUSD dengan sistematisasi berbasis AI, transparansi, dan kontrol risiko.{% else %}Algentra Capital membantu membaca sinyal XAUUSD dengan AI, menjalankan instruksi melalui EA MetaTrader, dan menyalin posisi ke akun Copy Trading.{% endif %}{% endblock %}">
+  <meta name="robots" content="{% if request.url.path in ['/', '/performance', '/register'] %}index,follow,max-image-preview:large{% else %}noindex,follow{% endif %}">
   <meta name="theme-color" content="#0d1a24">
+  <link rel="icon" type="image/png" sizes="512x512" href="/brand-logo.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="/brand-logo.png">
   <title>{% block title %}Algentra Capital | AI Copy Trading{% endblock %}</title>
   <style nonce="{{ request.state.csp_nonce }}">
     :root {

@@ -102,6 +102,7 @@ async def lifespan(_: FastAPI):
             ("max_market_deviation_pct", "5.0"),
             ("allow_updates", "false"),
             ("registration_open", "true"),
+            ("payments_enabled", "true"),
             ("symbol_mapping", '{"GOLD":"XAUUSD","XAU":"XAUUSD","EMAS":"XAUUSD"}'),
         )
         retired_controls = (
@@ -271,7 +272,7 @@ def register_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespon
     return templates.TemplateResponse(
         request=request,
         name="register.html",
-        context={"registration_open": True},
+        context={"registration_open": True, "site_origin": public_router.public_site_origin()},
     )
 
 

@@ -18,7 +18,7 @@ from ..schemas import SettingsUpdate
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 ALLOWED_SETTINGS = {
     "confidence_threshold", "symbol_mapping", "allow_updates",
-    "kill_switch", "max_market_deviation_pct", "registration_open", "entry_mode",
+    "kill_switch", "max_market_deviation_pct", "registration_open", "payments_enabled", "entry_mode",
 }
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9._]{1,32}$")
 
@@ -28,7 +28,7 @@ def _validate_setting(key: str, value: object) -> object:
         if not isinstance(value, str) or value not in {"SINGLE", "PARTIAL"}:
             raise HTTPException(status_code=422, detail="entry_mode harus SINGLE atau PARTIAL")
         return value
-    if key in {"allow_updates", "kill_switch", "registration_open"}:
+    if key in {"allow_updates", "kill_switch", "registration_open", "payments_enabled"}:
         if not isinstance(value, bool):
             raise HTTPException(status_code=422, detail=f"Setting '{key}' harus boolean")
         return value
@@ -83,6 +83,7 @@ def read_settings(db: Session = Depends(get_db)) -> dict[str, object]:
             continue
     config = get_settings()
     values.setdefault("entry_mode", "PARTIAL")
+    values.setdefault("payments_enabled", True)
     values[REGISTRATION_OPEN_KEY] = registration_is_open(db)
     values["gemini_configured"] = bool(config.gemini_api_key and config.gemini_api_key.get_secret_value())
     values["gemini_model"] = config.gemini_model

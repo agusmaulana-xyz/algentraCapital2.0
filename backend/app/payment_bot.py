@@ -44,6 +44,77 @@ def _http_error_summary(exc: httpx.HTTPStatusError) -> str:
     return f"HTTP {exc.response.status_code}: {description[:240]}"
 
 
+def provision_payment_order(db, order: PaymentOrder) -> tuple[str, int | None]:
+    """Create a follower account and update its order in the caller's transaction."""
+    plan = CLIENT_PLANS.get(order.plan)
+    if plan is None or order.total_idr != plan["price_idr"]:
+        return "INVALID_ORDER", None
+    duplicate_query = select(MT5Account.id).where(
+        func.lower(MT5Account.server) == order.server.casefold(),
+        MT5Account.login == order.login,
+    )
+    if order.execution_mode != "MANAGED":
+        duplicate_query = duplicate_query.where(MT5Account.owner_id == order.owner_id)
+    duplicate = db.execute(duplicate_query).scalar_one_or_none()
+    if duplicate is not None:
+        return "ACCOUNT_EXISTS", duplicate
+
+    token = secrets.token_urlsafe(32)
+    account = MT5Account(
+        owner_id=order.owner_id,
+        label=order.label,
+        server=order.server,
+        login=order.login,
+        plan=order.plan,
+        execution_mode=order.execution_mode,
+        role="follower",
+        token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        token_ciphertext=encrypt_account_token(token) if order.execution_mode != "MANAGED" else None,
+    )
+    db.add(account)
+    db.flush()
+    if order.execution_mode == "MANAGED" and order.prepayment_check_id:
+        check = db.get(PendingMT5Verification, order.prepayment_check_id)
+        if (
+            check is None
+            or check.status != "ORDERED"
+            or check.owner_id != order.owner_id
+            or check.label != order.label
+            or check.server.casefold() != order.server.casefold()
+            or check.login != order.login
+            or check.plan != order.plan
+            or check.execution_mode != order.execution_mode
+            or not check.password_ciphertext
+        ):
+            return "LOGIN_CHECK_EXPIRED", None
+        db.add(ManagedCopyProfile(
+            account_id=account.id,
+            password_ciphertext=check.password_ciphertext,
+            prepayment_check_id=check.id,
+            login_status="VALID",
+            login_message="Login MT5 berhasil. Sesi terminal dipertahankan untuk akun ini.",
+            active=False,
+            status="STANDBY",
+            status_message="Copy trading off. Terminal tersambung dan menunggu tombol Mulai.",
+        ))
+        check.status = "PROVISIONED"
+        check.message = "Akun disetujui. Sesi MT5 tetap tersambung dalam mode standby."
+    elif order.prepayment_check_id:
+        check = db.get(PendingMT5Verification, order.prepayment_check_id)
+        if check is not None:
+            check.status = "CANCELLED"
+            check.message = "Akun EA disetujui. Terminal pemeriksaan sementara dibersihkan."
+            check.password_ciphertext = ""
+            check.session_connected = False
+            check.session_observed_at = None
+        order.prepayment_check_id = None
+    order.account_id = account.id
+    order.status = "APPROVED"
+    order.payment_message = None
+    order.updated_at = utc_now()
+    return order.status, account.id
+
+
 def review_payment_order(order_id: int, decision: str) -> tuple[str, int | None]:
     """Apply a single admin decision; approval provisions the MT5 account."""
     if decision not in {"accept", "invalid"}:
@@ -69,80 +140,16 @@ def review_payment_order(order_id: int, decision: str) -> tuple[str, int | None]
             db.commit()
             return order.status, None
 
-        plan = CLIENT_PLANS.get(order.plan)
-        if plan is None or order.total_idr != plan["price_idr"]:
+        status, account_id = provision_payment_order(db, order)
+        if status != "APPROVED":
             db.rollback()
-            return "INVALID_ORDER", None
-        duplicate_query = select(MT5Account.id).where(
-            func.lower(MT5Account.server) == order.server.casefold(),
-            MT5Account.login == order.login,
-        )
-        if order.execution_mode != "MANAGED":
-            duplicate_query = duplicate_query.where(MT5Account.owner_id == order.owner_id)
-        duplicate = db.execute(duplicate_query).scalar_one_or_none()
-        if duplicate is not None:
-            db.rollback()
-            return "ACCOUNT_EXISTS", duplicate
-
-        token = secrets.token_urlsafe(32)
-        account = MT5Account(
-            owner_id=order.owner_id,
-            label=order.label,
-            server=order.server,
-            login=order.login,
-            plan=order.plan,
-            execution_mode=order.execution_mode,
-            role="follower",
-            token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
-            token_ciphertext=encrypt_account_token(token) if order.execution_mode != "MANAGED" else None,
-        )
-        db.add(account)
-        db.flush()
-        if order.execution_mode == "MANAGED" and order.prepayment_check_id:
-            check = db.get(PendingMT5Verification, order.prepayment_check_id)
-            if (
-                check is None
-                or check.status != "ORDERED"
-                or check.owner_id != order.owner_id
-                or check.label != order.label
-                or check.server.casefold() != order.server.casefold()
-                or check.login != order.login
-                or check.plan != order.plan
-                or check.execution_mode != order.execution_mode
-                or not check.password_ciphertext
-            ):
-                db.rollback()
-                return "LOGIN_CHECK_EXPIRED", None
-            db.add(ManagedCopyProfile(
-                account_id=account.id,
-                password_ciphertext=check.password_ciphertext,
-                prepayment_check_id=check.id,
-                login_status="VALID",
-                login_message="Login MT5 berhasil. Sesi terminal dipertahankan untuk akun ini.",
-                active=False,
-                status="STANDBY",
-                status_message="Copy trading off. Terminal tersambung dan menunggu tombol Mulai.",
-            ))
-            check.status = "PROVISIONED"
-            check.message = "Akun disetujui. Sesi MT5 tetap tersambung dalam mode standby."
-        elif order.prepayment_check_id:
-            check = db.get(PendingMT5Verification, order.prepayment_check_id)
-            if check is not None:
-                check.status = "CANCELLED"
-                check.message = "Akun EA disetujui. Terminal pemeriksaan sementara dibersihkan."
-                check.password_ciphertext = ""
-                check.session_connected = False
-                check.session_observed_at = None
-            order.prepayment_check_id = None
-        order.account_id = account.id
-        order.status = "APPROVED"
-        order.updated_at = utc_now()
+            return status, account_id
         try:
             db.commit()
         except IntegrityError:
             db.rollback()
             return "ACCOUNT_EXISTS", None
-        return order.status, account.id
+        return order.status, account_id
 
 
 class PaymentReviewBot:

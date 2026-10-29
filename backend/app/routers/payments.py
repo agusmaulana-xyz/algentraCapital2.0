@@ -1,6 +1,7 @@
 import logging
 import secrets
 import asyncio
+import json
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -15,8 +16,8 @@ from ..airpay import AirPayClient, AirPayError, AirPayInvoice, parse_amount
 from ..client_plans import CLIENT_PLANS
 from ..config import PROJECT_ROOT, get_settings
 from ..database import get_db
-from ..models import ClientUser, MT5Account, PaymentOrder, PendingMT5Verification, utc_now
-from ..payment_bot import MAX_PROOF_BYTES, payment_proof_path, payment_review_bot, review_payment_order
+from ..models import AppSetting, ClientUser, MT5Account, PaymentOrder, PendingMT5Verification, utc_now
+from ..payment_bot import MAX_PROOF_BYTES, payment_proof_path, payment_review_bot, provision_payment_order, review_payment_order
 from ..routers.mt5 import _aware, _managed_worker_online, require_client_id
 from ..time_utils import wib_iso
 
@@ -77,6 +78,19 @@ def _proof_kind(content: bytes) -> str | None:
     return None
 
 
+@router.get("/status")
+def payment_status(db: Session = Depends(get_db)) -> dict[str, bool]:
+    """Expose only the payment availability flag needed by the client form."""
+    item = db.get(AppSetting, "payments_enabled")
+    if item is None:
+        return {"payments_enabled": True}
+    try:
+        enabled = json.loads(item.value)
+    except (TypeError, json.JSONDecodeError):
+        enabled = True
+    return {"payments_enabled": enabled is not False}
+
+
 @router.get("/orders")
 def list_payment_orders(owner_id: int = Depends(require_client_id), db: Session = Depends(get_db)) -> list[dict[str, object]]:
     orders = db.execute(
@@ -118,8 +132,6 @@ def create_payment_order(
     owner_id: int = Depends(require_client_id),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
-    if not get_settings().airpay_configured:
-        raise HTTPException(status_code=503, detail="Pembayaran AirPay belum dikonfigurasi. Hubungi administrator.")
     label, server, login = payload.label.strip(), payload.server.strip(), payload.login.strip()
     if not label or not server or not login:
         raise HTTPException(status_code=422, detail="Nama akun, server, dan nomor login wajib diisi")
@@ -127,6 +139,14 @@ def create_payment_order(
 
     # Serialize order creation so simultaneous tabs cannot exceed the account limit.
     db.execute(text("BEGIN IMMEDIATE"))
+    payment_setting = db.get(AppSetting, "payments_enabled")
+    try:
+        payments_enabled = json.loads(payment_setting.value) is not False if payment_setting else True
+    except (TypeError, json.JSONDecodeError):
+        payments_enabled = True
+    if payments_enabled and not get_settings().airpay_configured:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Pembayaran AirPay belum dikonfigurasi. Hubungi administrator.")
     check = db.get(PendingMT5Verification, payload.prepayment_check_id)
     if (
         check is None
@@ -213,12 +233,13 @@ def create_payment_order(
         execution_mode=payload.execution_mode,
         prepayment_check_id=check.id,
         total_idr=plan["price_idr"],
-        payment_provider="AIRPAY",
-        airpay_status="NOT_CREATED",
+        payment_provider="AIRPAY" if payments_enabled else "DISABLED",
+        airpay_status="NOT_CREATED" if payments_enabled else None,
     )
     db.add(order)
     db.flush()
-    order.airpay_external_id = f"ALG-{order.id}-{secrets.token_hex(6).upper()}"
+    if payments_enabled:
+        order.airpay_external_id = f"ALG-{order.id}-{secrets.token_hex(6).upper()}"
     if payload.execution_mode == "MANAGED":
         check.status = "ORDERED"
     else:
@@ -229,6 +250,16 @@ def create_payment_order(
         check.password_ciphertext = ""
         check.session_connected = False
         check.session_observed_at = None
+    if not payments_enabled:
+        status, _account_id = provision_payment_order(db, order)
+        if status != "APPROVED":
+            db.rollback()
+            if status == "LOGIN_CHECK_EXPIRED":
+                raise HTTPException(status_code=409, detail="Sesi login MT5 kedaluwarsa. Periksa koneksi akun kembali.")
+            if status == "ACCOUNT_EXISTS":
+                raise HTTPException(status_code=409, detail="Server dan nomor login ini sudah terdaftar.")
+            raise HTTPException(status_code=409, detail="Akun tidak dapat dibuat. Periksa kembali data login MT5.")
+        order.payment_message = "Akun dibuat langsung tanpa tagihan karena pembayaran sedang dinonaktifkan."
     try:
         db.commit()
     except IntegrityError as exc:

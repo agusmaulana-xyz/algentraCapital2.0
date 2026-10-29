@@ -15,6 +15,15 @@
         <button id="registration-close" class="secondary" type="button">Tutup pendaftaran</button>
       </div>
       <p id="registration-message" class="status" role="status"></p>
+      <hr>
+      <h2 id="payment-controls-heading">Pembayaran client</h2>
+      <p id="payment-state" class="section-help" role="status">Memuat status pembayaran...</p>
+      <p class="muted">Saat pembayaran dimatikan, akun baru langsung dibuat setelah koneksi MT5 berhasil diverifikasi. Pesanan lama tidak berubah.</p>
+      <div class="toolbar">
+        <button id="payment-on" type="button">Aktifkan pembayaran</button>
+        <button id="payment-off" class="secondary" type="button">Matikan pembayaran</button>
+      </div>
+      <p id="payment-message" class="status" role="status"></p>
     </section>
     <div class="cards">
       <div class="card"><span>Total signal</span><b id="signals-total">&mdash;</b><small>Semua sinyal yang tercatat.</small></div>
@@ -198,9 +207,17 @@ const $ = (selector) => document.querySelector(selector);
       $("#registration-open").disabled=registrationOpen;
       $("#registration-close").disabled=!registrationOpen;
     }
+    function renderPaymentState(paymentsEnabled) {
+      $("#payment-state").textContent=paymentsEnabled
+        ? "Pembayaran aktif. Client melanjutkan ke pembayaran setelah verifikasi MT5."
+        : "Pembayaran nonaktif. Akun client baru langsung dibuat setelah verifikasi MT5.";
+      $("#payment-on").disabled=paymentsEnabled;
+      $("#payment-off").disabled=!paymentsEnabled;
+    }
     async function loadSettings() {
       const settings=await api("/api/settings");
       renderRegistrationState(settings.registration_open ?? true);
+      renderPaymentState(settings.payments_enabled ?? true);
       $("#confidence-threshold").value=settings.confidence_threshold ?? 0.75;
       $("#symbol-mapping").value=JSON.stringify(settings.symbol_mapping ?? {GOLD:"XAUUSD",XAU:"XAUUSD",EMAS:"XAUUSD"},null,2);
       $("#max-market-deviation").value=settings.max_market_deviation_pct ?? 5;
@@ -223,6 +240,20 @@ const $ = (selector) => document.querySelector(selector);
         buttons.forEach((button)=>button.disabled=false);
       }
     }
+    async function setPaymentsEnabled(enabled) {
+      const message=$("#payment-message");
+      const buttons=[$("#payment-on"),$("#payment-off")];
+      buttons.forEach((button)=>button.disabled=true);
+      message.textContent="Menyimpan status pembayaran...";
+      try {
+        await api("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:{payments_enabled:enabled}})});
+        message.textContent=enabled ? "Pembayaran diaktifkan." : "Pembayaran dimatikan. Akun baru akan langsung dibuat setelah verifikasi MT5.";
+        await loadSettings();
+      } catch(error) {
+        message.textContent=`Gagal mengubah status pembayaran: ${error.message}`;
+        buttons.forEach((button)=>button.disabled=false);
+      }
+    }
     setInterval(async()=>{
       if(document.hidden) return;
       try { const status=await api("/api/public/registration-status"); renderRegistrationState(status.registration_open); }
@@ -236,6 +267,8 @@ const $ = (selector) => document.querySelector(selector);
     $("#filter-trades").addEventListener("click",loadTrades);
     $("#registration-open").addEventListener("click",()=>setRegistrationOpen(true));
     $("#registration-close").addEventListener("click",()=>setRegistrationOpen(false));
+    $("#payment-on").addEventListener("click",()=>setPaymentsEnabled(true));
+    $("#payment-off").addEventListener("click",()=>setPaymentsEnabled(false));
     $("#settings-form").addEventListener("submit",async(event)=>{
       event.preventDefault(); const message=$("#settings-message");
       try {

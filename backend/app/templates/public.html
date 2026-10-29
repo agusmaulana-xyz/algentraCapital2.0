@@ -1,7 +1,27 @@
 {% extends "base.html" %}
 {% from "_cs_mascot.html" import algentra_mascot %}
 {% block title %}Algentra Capital | Copy Trading Otomatis Berbasis AI{% endblock %}
+{% block meta_description %}Kenali copy trading XAUUSD Algentra Capital. Tinjau data performa, pelajari alur AI dan MetaTrader 5, lalu hubungkan akun broker Anda sendiri.{% endblock %}
 {% block extra_head %}
+<link rel="canonical" href="{{ site_origin }}/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Algentra Capital">
+<meta property="og:locale" content="id_ID">
+<meta property="og:title" content="Algentra Capital | Copy Trading XAUUSD">
+<meta property="og:description" content="Tinjau performa dan pelajari copy trading XAUUSD berbasis AI dan MetaTrader 5. Gunakan akun broker Anda sendiri; pahami risiko sebelum mulai.">
+<meta property="og:url" content="{{ site_origin }}/">
+<meta property="og:image" content="{{ site_origin }}/share/algentra-capital.png">
+<meta property="og:image:secure_url" content="{{ site_origin }}/share/algentra-capital.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Algentra Capital — pelajari performa dan copy trading XAUUSD dengan AI dan MetaTrader 5">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Algentra Capital | Copy Trading XAUUSD">
+<meta name="twitter:description" content="Tinjau performa dan pelajari copy trading XAUUSD berbasis AI dan MetaTrader 5. Gunakan akun broker Anda sendiri; pahami risiko sebelum mulai.">
+<meta name="twitter:image" content="{{ site_origin }}/share/algentra-capital.png">
+<meta name="twitter:image:alt" content="Algentra Capital — pelajari performa dan copy trading XAUUSD dengan AI dan MetaTrader 5">
+<script type="application/ld+json" nonce="{{ request.state.csp_nonce }}">{{ structured_data | tojson }}</script>
 <style nonce="{{ request.state.csp_nonce }}">
   /* ---------- Tokens (mengikuti variabel base.html, dengan fallback) ---------- */
   .public-shell {
@@ -278,9 +298,9 @@
   <section class="hero">
     <div class="hero-copy">
       <span class="section-kicker">Analisis AI • Copy Trading • Kontrol Risiko</span>
-      <h1>Sinyal dianalisis AI, eksekusi berjalan <em>otomatis.</em></h1>
-      <p class="hero-text">AI membantu membaca dan menyusun sinyal XAUUSD dari kanal Telegram pilihan. EA (robot MetaTrader 5) menjalankan instruksi sesuai pengaturan dan batas risiko; semua posisi terbuka di akun utama, termasuk entry manual, dapat disalin ke akun Copy Trading yang terhubung.</p>
-      <div class="hero-actions"><a class="public-button" href="#performance">Lihat performa</a><a class="public-button secondary" href="#approach">Pelajari cara kerja</a>{% if registration_open %}<a class="public-button" href="/register">Daftar client</a>{% else %}<a class="public-button secondary" href="/#registration-launch">Menunggu launching</a>{% endif %}</div>
+      <h1>Copy trading XAUUSD dengan analisis berbasis <em>AI.</em></h1>
+      <p class="hero-text">Tertarik berinvestasi melalui copy trading XAUUSD? Tinjau data performa dan pelajari risikonya, lalu hubungkan akun broker MT5 milik Anda sendiri. Akun tetap atas kendali Anda.</p>
+      <div class="hero-actions"><a class="public-button" href="#performance">Tinjau performa</a><a class="public-button secondary" href="#approach">Cara kerja</a>{% if registration_open %}<a class="public-button" href="/register">Mulai copy trading</a>{% elif registration_launch_pending %}<a class="public-button secondary" href="/#registration-launch">Pendaftaran segera dibuka</a>{% else %}<a class="public-button secondary" href="/#registration-launch">Pendaftaran ditutup</a>{% endif %}</div>
     </div>
     <div class="hero-visual" aria-hidden="true">
       <div class="signal-orbit"><span class="orbit-line"></span><span class="orbit-node one"></span><span class="orbit-node two"></span><span class="orbit-node three"></span>
@@ -487,7 +507,7 @@
     </div>
   </section>
 
-  <section class="closing"><div><h2>Copy trading otomatis dengan AI.</h2><p>Analisis sinyal, eksekusi MetaTrader, dan penyalinan posisi dalam satu alur.</p></div>{% if registration_open %}<a class="public-button" href="/register">Buat akun klien</a>{% else %}<a class="public-button secondary" href="/#registration-launch">Tunggu launching</a>{% endif %}</section>
+  <section class="closing"><div><h2>Kenali performa dan risikonya sebelum mulai.</h2><p>Pelajari cara kerja copy trading XAUUSD, lalu hubungkan akun broker MT5 milik Anda jika layanan ini sesuai untuk Anda.</p></div><div class="hero-actions"><a class="public-button secondary" href="#performance">Lihat data performa</a>{% if registration_open %}<a class="public-button" href="/register">Mulai copy trading</a>{% elif registration_launch_pending %}<a class="public-button secondary" href="/#registration-launch">Tunggu launching</a>{% else %}<a class="public-button secondary" href="/#registration-launch">Pendaftaran ditutup</a>{% endif %}</div></section>
   <p class="risk-copy">Trading memiliki risiko kerugian. Equity dan perubahan historis bukan jaminan hasil di masa depan. Data publik ini berasal dari akun utama MT5 yang menjalankan Telegram Signal EA.</p>
 </main>
 {% endblock %}

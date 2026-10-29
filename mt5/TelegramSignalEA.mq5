@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.105"
+#property version   "1.106"
 #property description "Executes Telegram signals, reports master MT5 balance, and publishes all open positions"
 
 #define MAX_SIGNAL_TARGETS 20
@@ -25,9 +25,9 @@ input int MaxSlippage = 20;
 input int MaxSpreadPoints = 80;
 input bool AllowBuy = true;
 input bool AllowSell = true;
-input bool UseDefaultSLTP = true;
-input int DefaultSLPoints = 500;
-input int DefaultTPPoints = 1000;
+input bool ForceFixedSLTP = true; // aktif: paksa SL/TP tetap untuk semua sinyal, termasuk yang sudah mencantumkan level
+input int FixedSLPoints = 1000;
+input int FixedTPPoints = 2000;
 input string SymbolSuffix = "";
 input string SymbolMapCsv = ""; // Optional source-to-broker mapping, e.g. XAUUSD=XAUUSDc,US30=US30.cash
 input string MarketWatchlistCsv = "XAUUSD,EURUSD,USDJPY,GBPUSD";
@@ -661,6 +661,33 @@ double NormalizePrice(const string symbol, const double price)
    return NormalizeDouble(MathRound(price / tick) * tick, digits);
   }
 
+bool ApplyConfiguredSLTP(const string symbol, const string action, const double reference,
+                         double &sl, double &tp, string &reason)
+  {
+   reason = "";
+   if(!ForceFixedSLTP)
+      return true;
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(reference <= 0.0 || point <= 0.0 || FixedSLPoints <= 0 || FixedTPPoints <= 0)
+     {
+      reason = "Harga acuan atau konfigurasi fixed SL/TP tidak valid";
+      return false;
+     }
+
+   double sl_distance = EffectiveGoldPointLimit(symbol, FixedSLPoints) * point;
+   double tp_distance = EffectiveGoldPointLimit(symbol, FixedTPPoints) * point;
+   sl = action == "BUY" ? reference - sl_distance : reference + sl_distance;
+   tp = action == "BUY" ? reference + tp_distance : reference - tp_distance;
+   sl = NormalizePrice(symbol, sl);
+   tp = NormalizePrice(symbol, tp);
+   if(sl <= 0.0 || tp <= 0.0)
+     {
+      reason = "Harga fixed SL/TP tidak dapat dinormalisasi sesuai tick broker";
+      return false;
+     }
+   return true;
+  }
+
 double NormalizePriceInRange(const string symbol, const double price, const double lower, const double upper)
   {
    double tick = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -756,7 +783,7 @@ double CalculateLots(const string symbol, const string action, const double pric
                                risk_money, currency, minimum_lots);
          Print("[TelegramSignalEA] risk budget is zero; trying minimum broker lot symbol=", symbol,
                " lot=", DoubleToString(minimum_lots, 4),
-               " equity=", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
+               " balance=", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
          return minimum_lots;
         }
       reason = "Lot minimum broker tidak valid";
@@ -801,7 +828,7 @@ double CalculateLots(const string symbol, const string action, const double pric
       reason = StringFormat("Lot minimum broker tidak valid (min %.4f, max %.4f, step %.4f)", min_lot, max_lot, step);
       Print("[TelegramSignalEA] lot sizing blocked symbol=", symbol,
             " account_currency=", currency,
-            " equity=", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
+            " balance=", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
             " RiskPercent=", DoubleToString(RiskPercent, 2),
             " risk_per_entry=", DoubleToString(risk_money, 2),
             " min_lot=", DoubleToString(min_lot, 4),
@@ -1073,10 +1100,12 @@ bool ValidateSignalPlan(const string symbol, const string action, const string r
         }
 
       double sl = sl_input;
-      if(UseDefaultSLTP && sl <= 0.0 && DefaultSLPoints > 0 && point > 0.0)
-         sl = action == "BUY" ? reference - EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point : reference + EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point;
-      if(UseDefaultSLTP && tp <= 0.0 && DefaultTPPoints > 0 && point > 0.0)
-         tp = action == "BUY" ? reference + EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point : reference - EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point;
+      string protection_error = "";
+      if(!ApplyConfiguredSLTP(symbol, action, reference, sl, tp, protection_error))
+        {
+         reason = protection_error;
+         return false;
+        }
       sl = NormalizePrice(symbol, sl);
       tp = NormalizePrice(symbol, tp);
       if(!CheckPriceLevels(symbol, action, reference, sl, tp))
@@ -1228,15 +1257,13 @@ bool ProcessOrderLeg(const long signal_id, const string symbol, const string act
      }
 
    double reference = market ? current_price : entry;
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    double sl = sl_input;
    double tp = tp_input;
-   if(UseDefaultSLTP && point > 0.0)
+   string protection_error = "";
+   if(!ApplyConfiguredSLTP(symbol, action, reference, sl, tp, protection_error))
      {
-      if(sl <= 0.0 && DefaultSLPoints > 0)
-         sl = action == "BUY" ? reference - EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point : reference + EffectiveGoldPointLimit(symbol, DefaultSLPoints) * point;
-      if(tp <= 0.0 && DefaultTPPoints > 0)
-         tp = action == "BUY" ? reference + EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point : reference - EffectiveGoldPointLimit(symbol, DefaultTPPoints) * point;
+      ReportLegOutcome(signal_id, symbol, action, leg, "REJECTED", 0.0, protection_error);
+      return false;
      }
    sl = NormalizePrice(symbol, sl);
    tp = NormalizePrice(symbol, tp);
@@ -1429,9 +1456,9 @@ void ProcessSignal(const string item)
    double risk_money_per_leg = 0.0;
    if(LotMode == LOT_RISK_PERCENT && RiskPercent > 0.0)
      {
-      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-      if(equity > 0.0)
-         risk_money_per_leg = equity * RiskPercent / 100.0 / MathMax(1, order_count);
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      if(balance > 0.0)
+         risk_money_per_leg = balance * RiskPercent / 100.0 / MathMax(1, order_count);
      }
 
    if(order_count > 1 && AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
@@ -1483,7 +1510,7 @@ void SendHeartbeat()
   {
    string symbol = JsonEscape(_Symbol);
    string body = StringFormat(
-      "{\"active\":true,\"terminal\":\"%s\",\"version\":\"1.105\",\"symbol\":\"%s\"}",
+      "{\"active\":true,\"terminal\":\"%s\",\"version\":\"1.106\",\"symbol\":\"%s\"}",
       JsonEscape(TerminalInfoString(TERMINAL_NAME)), symbol);
    string response;
    HttpRequest("POST", "/api/ea/heartbeat", body, response);
@@ -1568,7 +1595,7 @@ void UpdatePanel()
   {
    int closed = g_wins + g_losses;
    double winrate = closed > 0 ? (double)g_wins / closed * 100.0 : 0.0;
-    Comment("TelegramSignalEA 1.105\n",
+    Comment("TelegramSignalEA 1.106\n",
            "Backend: ", g_connection_status, "\n",
            "Mode: LIVE\n",
            "Signals this session: ", g_signal_count, "\n",
@@ -1582,6 +1609,16 @@ int OnInit()
    if(PollIntervalMs < 100)
      {
       Print("[TelegramSignalEA] PollIntervalMs must be >= 100");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(ForceFixedSLTP && (FixedSLPoints <= 0 || FixedTPPoints != 2 * FixedSLPoints))
+     {
+      Print("[TelegramSignalEA] FixedTPPoints must be exactly 2x FixedSLPoints when ForceFixedSLTP is enabled");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(LotMode == LOT_RISK_PERCENT && (RiskPercent <= 0.0 || RiskPercent > 100.0))
+     {
+      Print("[TelegramSignalEA] RiskPercent must be greater than 0 and no more than 100");
       return INIT_PARAMETERS_INCORRECT;
      }
    g_trade.SetExpertMagicNumber((ulong)MagicNumber);

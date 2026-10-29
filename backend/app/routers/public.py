@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ from ..registration import LAUNCH_AT, registration_is_open, registration_launch_
 
 router = APIRouter(tags=["public"])
 MARKET_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+DEFAULT_SITE_ORIGIN = "https://algentracapital.my.id"
 templates = Jinja2Templates(directory=str(PROJECT_ROOT / "backend" / "app" / "templates"))
 
 
@@ -34,6 +35,25 @@ def equity_session_start(now: datetime) -> datetime:
     wib_now = as_utc(now).astimezone(WIB)
     session_date = wib_now.date() if wib_now.hour >= 7 else wib_now.date() - timedelta(days=1)
     return datetime.combine(session_date, time(hour=7), tzinfo=WIB).astimezone(timezone.utc)
+
+
+def public_site_origin() -> str:
+    """Use the configured production domain only when it is a safe HTTPS origin."""
+    raw_url = (get_settings().contact_website or "").strip()
+    try:
+        parsed = urlsplit(raw_url)
+        hostname = (parsed.hostname or "").casefold()
+        if (
+            parsed.scheme == "https"
+            and hostname in {"algentracapital.my.id", "www.algentracapital.my.id"}
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port is None
+        ):
+            return f"https://{hostname}"
+    except ValueError:
+        pass
+    return DEFAULT_SITE_ORIGIN
 
 
 def _public_contact_context(db: Session) -> dict[str, object]:
@@ -82,7 +102,39 @@ def _public_contact_context(db: Session) -> dict[str, object]:
                 display = path
             socials.append({"label": label, "url": safe_url, "icon": icon, "display": display})
 
+    site_origin = public_site_origin()
+    organization_id = f"{site_origin}/#organization"
+    structured_data = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "Organization",
+                "@id": organization_id,
+                "name": "Algentra Capital",
+                "url": f"{site_origin}/",
+                "logo": {
+                    "@type": "ImageObject",
+                    "url": f"{site_origin}/brand-logo.png",
+                    "width": 512,
+                    "height": 512,
+                },
+                "sameAs": [social["url"] for social in socials if social["label"] != "Website"],
+            },
+            {
+                "@type": "WebSite",
+                "@id": f"{site_origin}/#website",
+                "url": f"{site_origin}/",
+                "name": "Algentra Capital",
+                "alternateName": "Algentra Capital Copy Trading",
+                "inLanguage": "id-ID",
+                "publisher": {"@id": organization_id},
+            },
+        ],
+    }
+
     return {
+        "site_origin": site_origin,
+        "structured_data": structured_data,
         "contact_person": (settings.contact_person_name or "").strip(),
         "contact_whatsapp": whatsapp,
         "contact_email": email,
@@ -275,6 +327,54 @@ def public_pnl_calendar(
 @router.get("/api/public/registration-status")
 def public_registration_status(db: Session = Depends(get_db)) -> dict[str, bool]:
     return {"registration_open": registration_is_open(db)}
+
+
+@router.get("/robots.txt", include_in_schema=False)
+def robots_txt() -> Response:
+    content = f"User-agent: *\nAllow: /\nSitemap: {public_site_origin()}/sitemap.xml\n"
+    return Response(content, media_type="text/plain", headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.get("/sitemap.xml", include_in_schema=False)
+def sitemap_xml(db: Session = Depends(get_db)) -> Response:
+    site_origin = public_site_origin()
+    registration_urls = (
+        f"\n  <url><loc>{site_origin}/register</loc></url>"
+        if registration_is_open(db)
+        else ""
+    )
+    content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>{site_origin}/</loc>
+    <image:image>
+      <image:loc>{site_origin}/share/algentra-capital.png</image:loc>
+      <image:title>Algentra Capital — Copy Trading XAUUSD</image:title>
+    </image:image>
+  </url>
+  {registration_urls}
+</urlset>'''
+    return Response(content, media_type="application/xml", headers={"Cache-Control": "public, max-age=3600"})
+
+
+@router.get("/share/algentra-capital.png", include_in_schema=False)
+def social_share_image() -> FileResponse:
+    image_path = PROJECT_ROOT / "backend" / "app" / "static" / "algentra-share-1200x630.png"
+    return FileResponse(
+        image_path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"},
+    )
+
+
+@router.get("/brand-logo.png", include_in_schema=False)
+def brand_logo_image() -> FileResponse:
+    image_path = PROJECT_ROOT / "backend" / "app" / "static" / "algentra-brand-512.png"
+    return FileResponse(
+        image_path,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"},
+    )
 
 
 @router.get("/musik.mp3", include_in_schema=False)

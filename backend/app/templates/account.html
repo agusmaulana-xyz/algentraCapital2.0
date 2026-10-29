@@ -12,7 +12,7 @@
 
   <section>
     <h2>Hubungkan akun Copy Trading</h2>
-    <p class="section-help">Isi nama akun, ID akun MT5, server, dan password trading. Kami cek koneksi login terlebih dahulu tanpa mengirim order; tombol lanjut bayar aktif setelah login berhasil. Untuk mode dikelola server, password dienkripsi dan hanya dipakai worker untuk mempertahankan atau memulihkan koneksi terminal. Untuk mode EA sendiri, password dihapus setelah pemeriksaan.</p>
+    <p class="section-help">Isi nama akun, ID akun MT5, server, dan password trading. Kami cek koneksi login terlebih dahulu tanpa mengirim order. Jika pembayaran aktif, Anda diarahkan ke pembayaran setelah login berhasil; jika nonaktif, akun langsung dibuat. Untuk mode dikelola server, password dienkripsi dan hanya dipakai worker untuk mempertahankan atau memulihkan koneksi terminal. Untuk mode EA sendiri, password dihapus setelah pemeriksaan.</p>
     <form id="account-form" class="form-grid account-connect-form">
       <fieldset class="plan-picker">
         <legend>Cara menjalankan copy trading</legend>
@@ -44,7 +44,7 @@
           </label>
           {% endfor %}
         </div>
-        <p class="field-help">Total pembayaran mengikuti harga paket yang dipilih. QRIS untuk pembayaran ditampilkan pada halaman transaksi.</p>
+        <p id="payment-mode-message" class="field-help">Total paket mengikuti harga yang tertera. Status pembayaran sedang dimuat.</p>
       </fieldset>
       <label>Nama akun copy<input name="label" maxlength="80" placeholder="Copy Trading 1" required></label>
       <label>Server broker
@@ -56,7 +56,7 @@
       </label>
       <label>ID akun MT5<input name="login" maxlength="32" inputmode="numeric" pattern="[0-9]+" title="ID akun MT5 hanya boleh berisi angka" aria-describedby="account-login-help" required><span id="account-login-help" class="field-help">Masukkan ID login MT5 berupa angka saja, tanpa spasi.</span></label>
       <label>Password trading MT5<input id="broker-password" type="password" maxlength="128" autocomplete="current-password" required><span class="field-help">Dipakai untuk memeriksa login dan menjaga worker dapat menyambungkan terminal kembali. Jangan masukkan password investor/read-only.</span></label>
-      <div class="account-connect-actions"><button id="check-mt5-login" type="button" disabled>Periksa koneksi MT5</button><button id="continue-to-payment" type="submit" disabled>Lanjutkan ke pembayaran</button></div>
+      <div class="account-connect-actions"><button id="check-mt5-login" type="button" disabled>Periksa koneksi MT5</button><button id="continue-to-payment" type="submit" disabled>Lanjutkan</button></div>
     </form>
     <p id="account-message" class="status" role="status"></p>
     <div id="new-token" hidden></div>
@@ -139,6 +139,7 @@ let prepaymentCheckInProgress = false;
 let pendingPrepaymentRequestId = null;
 let pendingPrepaymentRequestStartedAt = 0;
 let prepaymentCleanupPending = Promise.resolve();
+let clientPaymentsEnabled = true;
 
 const accountLoginInput = document.querySelector('#account-form [name="login"]');
 accountLoginInput.addEventListener("input", () => {
@@ -152,6 +153,7 @@ const brokerServerOptions = document.querySelector("#broker-server-options");
 const brokerServerHelp = document.querySelector("#broker-server-help");
 const prepaymentCheckButton = document.querySelector("#check-mt5-login");
 const continuePaymentButton = document.querySelector("#continue-to-payment");
+const paymentModeMessage = document.querySelector("#payment-mode-message");
 let brokerSearchTimer = null;
 let brokerSearchRun = 0;
 
@@ -660,10 +662,24 @@ async function loadAccounts() {
   }
 }
 
+async function loadPaymentMode() {
+  try {
+    const status = await api("/api/payments/status", {cache:"no-store"});
+    clientPaymentsEnabled = status.payments_enabled !== false;
+    continuePaymentButton.textContent = clientPaymentsEnabled ? "Lanjutkan ke pembayaran" : "Buat akun copy trading";
+    paymentModeMessage.textContent = clientPaymentsEnabled
+      ? "Pembayaran aktif. Total mengikuti harga paket dan QRIS tersedia setelah pesanan dibuat."
+      : "Pembayaran sedang dinonaktifkan. Setelah login MT5 terverifikasi, akun langsung dibuat tanpa tagihan.";
+  } catch (_) {
+    // Keep the server's default (payments enabled) if status cannot be loaded.
+    clientPaymentsEnabled = true;
+  }
+}
+
 accountForm.addEventListener("submit", async (event) => {
   event.preventDefault(); statusBox.textContent = "";
   if (!prepaymentCheckId) {
-    statusBox.textContent = "Periksa koneksi login MT5 terlebih dahulu sebelum melanjutkan pembayaran.";
+    statusBox.textContent = "Periksa koneksi login MT5 terlebih dahulu sebelum membuat akun.";
     continuePaymentButton.disabled = true;
     return;
   }
@@ -679,10 +695,21 @@ accountForm.addEventListener("submit", async (event) => {
   try {
     const order = await api("/api/payments/orders", {method:"POST", body:JSON.stringify(payload)});
     accountForm.reset();
-    window.location.assign(`/transactions?order=${encodeURIComponent(order.id)}`);
+    if (order.status === "APPROVED" && order.account_id) {
+      prepaymentCheckId = null;
+      prepaymentCheckExpiresAt = 0;
+      if (prepaymentSessionTimer) clearInterval(prepaymentSessionTimer);
+      prepaymentSessionTimer = null;
+      continuePaymentButton.disabled = true;
+      statusBox.textContent = "Akun berhasil dibuat. Akun copy trading siap dan menunggu Anda menekan tombol Mulai.";
+      await loadAccounts();
+    } else {
+      window.location.assign(`/transactions?order=${encodeURIComponent(order.id)}`);
+    }
   } catch (error) { statusBox.textContent = error.message; continuePaymentButton.disabled = !prepaymentCheckId; }
 });
 
+loadPaymentMode();
 loadAccounts();
 setInterval(() => { if (!document.hidden && !managedFormDirty) loadAccounts(); }, 5000);
 </script>

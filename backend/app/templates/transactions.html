@@ -38,14 +38,14 @@
 <main id="main" tabindex="-1" class="page-shell">
   <div class="page-heading">
     <div><span class="eyebrow">PORTAL KLIEN / PEMBAYARAN</span><h1>Riwayat transaksi</h1>
-      <p class="page-description">Bayar pesanan melalui QRIS AirPay dan pantau konfirmasi otomatis dari halaman ini.</p>
+      <p class="page-description">Pantau status pesanan dan pembayaran AirPay di halaman ini.</p>
     </div>
     <a class="workspace-tag" href="/account">Kembali ke akun MT5</a>
   </div>
   <section aria-labelledby="transactions-title">
     <h2 id="transactions-title">Pesanan dan pembayaran</h2>
     <div class="transaction-toolbar">
-      <p class="section-help">Nominal QRIS memakai kode unik. Bayar sesuai total yang ditampilkan agar pesanan terkonfirmasi otomatis.</p>
+      <p class="section-help">Untuk pesanan yang memerlukan pembayaran, ikuti nominal QRIS dan status konfirmasi yang ditampilkan.</p>
       <label for="transaction-filter">Tampilkan
         <select id="transaction-filter">
           <option value="ALL">Semua transaksi</option>
@@ -138,6 +138,8 @@ function detailsFor(order) {
     }
     if (order.airpay_expiry_at) addDetail(details, "Batas pembayaran", orderDate(order.airpay_expiry_at));
     if (order.airpay_status) addDetail(details, "Status QRIS", order.airpay_status);
+  } else if (order.payment_provider === "DISABLED") {
+    addDetail(details, "Total pembayaran", "Tidak ada tagihan");
   } else {
     addDetail(details, "Total pembayaran", money(order.total_idr));
   }
@@ -162,7 +164,9 @@ function showReceipt(order) {
     receiptContent.append(label, proof);
   } else {
     const noProof = document.createElement("p"); noProof.className = "receipt-empty";
-    noProof.textContent = "Bukti transaksi belum diunggah untuk pesanan ini.";
+    noProof.textContent = order.payment_provider === "DISABLED"
+      ? "Tidak ada pembayaran yang diperlukan untuk pesanan ini."
+      : "Bukti transaksi belum diunggah untuk pesanan ini.";
     receiptContent.append(noProof);
   }
   receiptDialog.showModal();
@@ -230,9 +234,11 @@ function renderOrders(force = false) {
       card.append(progress);
     } else if (order.status === "APPROVED") {
       const complete = document.createElement("p"); complete.className = "transaction-note";
-      complete.textContent = order.execution_mode === "MANAGED"
-        ? "Pembayaran diterima. Buka portal akun untuk mengatur kredensial broker; copy trading tetap dijeda sampai Anda memulainya."
-        : "Pembayaran diterima dan akun Copy Trading sudah dibuat.";
+      complete.textContent = order.payment_provider === "DISABLED"
+        ? "Akun Copy Trading dibuat langsung tanpa pembayaran."
+        : order.execution_mode === "MANAGED"
+          ? "Pembayaran diterima. Buka portal akun untuk mengatur kredensial broker; copy trading tetap dijeda sampai Anda memulainya."
+          : "Pembayaran diterima dan akun Copy Trading sudah dibuat.";
       card.append(complete);
       addButton(actions, "Buka akun Copy Trading", () => { window.location.assign("/account"); }, true);
     } else if (order.status === "REJECTED") {

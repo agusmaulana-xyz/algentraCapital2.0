@@ -9,7 +9,7 @@
 //| CHANGELOG.md di folder project ini.                              |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.31"
+#property version   "3.32"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -40,7 +40,9 @@ input double InpMaxSpreadATRPercent = 30.0;  // spread maks = sekian % dari ATR 
 input double InpMaxSpreadPointsHardCap = 600; // hard cap absolut, jaring pengaman kedua
 
 input group "=== Risk management ==="
-input double InpFixedLot          = 0.01;    // satu order per sinyal dengan lot tetap
+input bool   InpUseRiskPercent     = true;    // mode default: risiko dihitung dari balance akun
+input double InpRiskPercent        = 1.0;     // risiko target per posisi sebagai persentase balance
+input double InpFixedLot          = 0.01;    // lot tetap hanya jika InpUseRiskPercent=false
 input double InpAtrSLMultiplier   = 1.10;    // SL lebih rapat drpd versi M5 (sesuai skala M1)
 input double InpMaxDailyLossPercent = 10.0;   // batas rugi harian (%) sebelum EA berhenti trading
 input double InpMaxLotSize        = 5.0;
@@ -49,8 +51,8 @@ input int    InpMaxTradesPerDay   = 0;       // batas jumlah sinyal/trade per ha
 
 input group "=== Fixed points RR (default) / legacy adaptive RR ==="
 input bool   InpUseFixedPointRR     = true;  // aktif: SL/TP tetap 1000:2000 point; nonaktif: gunakan pengaturan ATR di bawah
-input double InpFixedSLPoints       = 1000;  // jarak SL tetap dalam point broker
-input double InpFixedTPPoints       = 2000;  // jarak TP tetap dalam point broker (wajib 2x SL)
+input int    InpFixedSLPoints       = 1000;  // jarak SL tetap dalam point broker
+input int    InpFixedTPPoints       = 2000;  // jarak TP tetap dalam point broker (wajib 2x SL)
 
 input group "=== Legacy ATR risk management (dipakai jika Fixed points RR nonaktif) ==="
 input double InpSLNoiseBufferATR    = 0.35;   // buffer tambahan (x ATR) di atas SL dasar, meredam wick/noise M1
@@ -286,7 +288,7 @@ void WriteStatus()
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    double pnl=(dayStartEquity>0 ? (equity-dayStartEquity)/dayStartEquity*100.0 : 0.0);
    int maxTradesEffective=(currentMode=="H24_UNLIMITED")?0:InpMaxTradesPerDay;
-   string json=StringFormat("{\"timestamp\":\"%s\",\"magic\":%I64d,\"symbol\":\"%s\",\"mode\":\"%s\",\"strategy\":\"RANGE_BREAKOUT_M1_SINGLE_FIXED_LOT\",\"trading_halted_today\":%s,\"halt_reason\":\"%s\",\"trades_today\":%d,\"max_trades_per_day\":%d,\"daily_pnl_percent\":%.2f,\"max_daily_loss_percent\":%.2f,\"max_daily_profit_percent\":%.2f,\"equity\":%.2f,\"balance\":%.2f,\"fixed_lot\":%.2f,\"open_positions\":%d,\"position_type\":\"%s\",\"last_signal\":\"%s\",\"last_signal_mode\":\"%s\",\"last_signal_time\":\"%s\",\"sr_resistance\":%.2f,\"sr_support\":%.2f,\"sr_reversal_enabled\":%s,\"scan_state\":\"%s\",\"scan_detail\":\"%s\",\"last_tick_time\":\"%s\",\"indicators_ready\":%s,\"ea_running\":true}",
+   string json=StringFormat("{\"timestamp\":\"%s\",\"magic\":%I64d,\"symbol\":\"%s\",\"mode\":\"%s\",\"strategy\":\"RANGE_BREAKOUT_M1_SINGLE\",\"trading_halted_today\":%s,\"halt_reason\":\"%s\",\"trades_today\":%d,\"max_trades_per_day\":%d,\"daily_pnl_percent\":%.2f,\"max_daily_loss_percent\":%.2f,\"max_daily_profit_percent\":%.2f,\"equity\":%.2f,\"balance\":%.2f,\"lot_mode\":\"%s\",\"risk_percent\":%.2f,\"fixed_lot\":%.2f,\"open_positions\":%d,\"position_type\":\"%s\",\"last_signal\":\"%s\",\"last_signal_mode\":\"%s\",\"last_signal_time\":\"%s\",\"sr_resistance\":%.2f,\"sr_support\":%.2f,\"sr_reversal_enabled\":%s,\"scan_state\":\"%s\",\"scan_detail\":\"%s\",\"last_tick_time\":\"%s\",\"indicators_ready\":%s,\"ea_running\":true}",
                             GetWIBTimeString(),
                             InpMagicNumber,
                             _Symbol,
@@ -300,6 +302,8 @@ void WriteStatus()
                             InpMaxDailyProfitPercent,
                             equity,
                             AccountInfoDouble(ACCOUNT_BALANCE),
+                            InpUseRiskPercent?"RISK_PERCENT_BALANCE":"FIXED_LOT",
+                            InpRiskPercent,
                             InpFixedLot,
                             positions,
                             posType,
@@ -368,10 +372,100 @@ int M1TrendDirection()
 
 double NormalizeVolume(double volume)
   {
-   double minLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN), maxLot=MathMin(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX),InpMaxLotSize), step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
-   if(step<=0 || volume<minLot) return 0;
-   volume=MathFloor(volume/step)*step;
-   return NormalizeDouble(MathMin(volume,maxLot),2);
+   double minLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxLot=MathMin(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX),InpMaxLotSize);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(step<=0 || minLot<=0 || maxLot<minLot || volume<minLot) return 0;
+   double capped=MathMin(volume,maxLot);
+   double normalized=minLot+MathFloor((capped-minLot+step*0.000001)/step)*step;
+   if(normalized>maxLot+step*0.000001) normalized-=step;
+   int digits=0;
+   for(digits=0;digits<=8;digits++)
+      if(MathAbs(step-NormalizeDouble(step,digits))<0.000000001) break;
+   return NormalizeDouble(normalized,MathMin(digits,8));
+  }
+
+bool AccountUsesCentSymbols()
+  {
+   string currency=AccountInfoString(ACCOUNT_CURRENCY);
+   StringToUpper(currency);
+   if(StringFind(currency,"CENT")>=0) return true;
+   string centCurrencies[]={"USC","USDC","EUC","GBC","GBPC","AUC","AUDC","CADC","JPYC"};
+   for(int i=0;i<ArraySize(centCurrencies);i++)
+      if(currency==centCurrencies[i]) return true;
+   string identity=AccountInfoString(ACCOUNT_SERVER)+" "+AccountInfoString(ACCOUNT_NAME)+" "+TerminalInfoString(TERMINAL_COMPANY);
+   StringToUpper(identity);
+   return StringFind(identity,"CENT")>=0;
+  }
+
+double GoldPointMultiplier(const string symbol)
+  {
+   string normalized=symbol;
+   StringToUpper(normalized);
+   if(StringFind(normalized,"XAUUSD")!=0) return 1.0;
+   double point=SymbolInfoDouble(symbol,SYMBOL_POINT);
+   if(point<=0.0) return 1.0;
+   if(AccountUsesCentSymbols() || normalized=="XAUUSDC")
+      return MathMax(1.0,0.01/point);
+   return 1.0;
+  }
+
+int EffectiveGoldPointLimit(const int configuredPoints)
+  {
+   if(configuredPoints<=0) return configuredPoints;
+   return (int)MathCeil((double)configuredPoints*GoldPointMultiplier(_Symbol));
+  }
+
+double CalculateRiskVolume(const double entry,const double stopLoss,string &reason)
+  {
+   reason="";
+   double minLot=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxLot=MathMin(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX),InpMaxLotSize);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(minLot<=0.0 || maxLot<minLot || step<=0.0)
+     {
+      reason=StringFormat("Spesifikasi volume broker tidak valid (min %.4f, max %.4f, step %.4f)",minLot,maxLot,step);
+      return 0.0;
+     }
+
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskMoney=balance*InpRiskPercent/100.0;
+   if(riskMoney<=0.0)
+     {
+      double minimum=NormalizeVolume(minLot);
+      reason=StringFormat("Anggaran risiko %.2f; mencoba lot minimum broker %.4f",riskMoney,minimum);
+      return minimum;
+     }
+
+   ENUM_ORDER_TYPE orderType=(entry>=stopLoss ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+   double profitAtStop=0.0;
+   ResetLastError();
+   if(!OrderCalcProfit(orderType,_Symbol,1.0,entry,stopLoss,profitAtStop))
+     {
+      reason=StringFormat("OrderCalcProfit gagal untuk %s (error %d)",_Symbol,GetLastError());
+      return 0.0;
+     }
+   double riskPerLot=MathAbs(profitAtStop);
+   if(riskPerLot<=0.0)
+     {
+      reason="Estimasi risiko per lot tidak valid";
+      return 0.0;
+     }
+
+   double requestedLots=riskMoney/riskPerLot;
+   if(requestedLots+step*0.000001<minLot)
+     {
+      double minimum=NormalizeVolume(minLot);
+      double minimumRisk=riskPerLot*minLot;
+      reason=StringFormat("Lot risiko %.6f di bawah minimum broker; memakai %.4f dengan estimasi risiko %.2f (target %.2f)",
+                          requestedLots,minimum,minimumRisk,riskMoney);
+      return minimum;
+     }
+
+   double lots=NormalizeVolume(requestedLots);
+   if(lots<=0.0)
+      reason=StringFormat("Lot %.6f tidak sesuai batas volume broker atau InpMaxLotSize %.2f",requestedLots,InpMaxLotSize);
+   return lots;
   }
 
 void SetUniversalFillingMode(const string symbol)
@@ -434,7 +528,7 @@ bool SendWebsiteTradeReport(string event,long positionId,string symbol,string ac
 void SendWebsiteHeartbeat()
   {
    string body=StringFormat(
-      "{\"active\":true,\"terminal_login\":\"%I64d\",\"terminal_server\":\"%s\",\"version\":\"EA Scalper 3.30\",\"symbol\":\"%s\",\"magic\":%I64d}",
+      "{\"active\":true,\"terminal_login\":\"%I64d\",\"terminal_server\":\"%s\",\"version\":\"EA Scalper 3.32\",\"symbol\":\"%s\",\"magic\":%I64d}",
       AccountInfoInteger(ACCOUNT_LOGIN),JsonEscape(AccountInfoString(ACCOUNT_SERVER)),JsonEscape(_Symbol),InpMagicNumber);
    WebsiteHttpPost("/api/ea/scalper/heartbeat",body);
   }
@@ -879,7 +973,9 @@ void OpenSingleEntry(int trend,double atr,string reason,string signalMode="BREAK
 
    // Fixed mode uses exact broker-point distances. ATR/SR stop adjustments and anti-noise
    // buffers remain available in legacy mode, but would break the requested 1000:2000 RR.
-   double baseSLDistance=(InpUseFixedPointRR ? InpFixedSLPoints*_Point : atr*InpAtrSLMultiplier);
+   int fixedSLPoints=EffectiveGoldPointLimit(InpFixedSLPoints);
+   int fixedTPPoints=EffectiveGoldPointLimit(InpFixedTPPoints);
+   double baseSLDistance=(InpUseFixedPointRR ? fixedSLPoints*_Point : atr*InpAtrSLMultiplier);
    double sl=(trend==1 ? entry-baseSLDistance : entry+baseSLDistance);
    if(!InpUseFixedPointRR && srInvalidationLevel>0)
      {
@@ -907,11 +1003,11 @@ void OpenSingleEntry(int trend,double atr,string reason,string signalMode="BREAK
       double spreadPoints=spreadNow/_Point;
       double minStopPoints=(double)MathMax(SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL),
                                            SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL));
-      double tightestBrokerDistance=MathMin(InpFixedSLPoints-spreadPoints,InpFixedTPPoints-spreadPoints);
+      double tightestBrokerDistance=MathMin(fixedSLPoints-spreadPoints,fixedTPPoints-spreadPoints);
       if(tightestBrokerDistance<=minStopPoints)
         {
          string stopReason=StringFormat("Fixed RR %.0f:%.0f point tidak memenuhi batas broker (jarak minimum %.0f point)",
-                                        InpFixedSLPoints,InpFixedTPPoints,minStopPoints);
+                                        (double)fixedSLPoints,(double)fixedTPPoints,minStopPoints);
          AppendEvent("ORDER_FAILED",stopReason);
          SetScanState("FIXED_RR_STOP_DISTANCE",stopReason);
          return;
@@ -920,12 +1016,19 @@ void OpenSingleEntry(int trend,double atr,string reason,string signalMode="BREAK
    else
       sl=EnforceMinStopDistance(entry,sl,trend!=1);
    sl=NormalizeDouble(sl,_Digits);
-   // Volume satu order selalu memakai lot tetap yang dinormalisasi ke aturan broker.
-   double volume=NormalizeVolume(MathMin(InpFixedLot,InpMaxLotSize));
-   if(volume<=0) { SetScanState("LOT_UNAVAILABLE","Lot tetap tidak memenuhi minimum/step broker"); return; }
+   string lotReason="";
+   double volume=(InpUseRiskPercent ? CalculateRiskVolume(entry,sl,lotReason) :
+                  NormalizeVolume(MathMin(InpFixedLot,InpMaxLotSize)));
+   if(volume<=0)
+     {
+      SetScanState("LOT_UNAVAILABLE",lotReason!=""?lotReason:"Lot tidak memenuhi minimum/step broker");
+      return;
+     }
+   if(lotReason!="")
+      Print("[EA Scalper] ",lotReason);
 
    double tpRR=(InpUseFixedPointRR ? 2.0 : SelectedTakeProfitRR());
-   double tpDistance=(InpUseFixedPointRR ? InpFixedTPPoints*_Point :
+   double tpDistance=(InpUseFixedPointRR ? fixedTPPoints*_Point :
                       (InpDecoupleTPFromSL ? baseSLDistance : MathAbs(entry-sl))*tpRR);
    double tp=(trend==1 ? entry+tpDistance : entry-tpDistance);
    if(!InpUseFixedPointRR)
@@ -1094,7 +1197,9 @@ void TryEntry()
 
 int OnInit()
   {
-   if(InpRangeBars<2 || InpFixedLot<=0) return INIT_PARAMETERS_INCORRECT;
+   if(InpRangeBars<2) return INIT_PARAMETERS_INCORRECT;
+   if(InpUseRiskPercent && (InpRiskPercent<=0.0 || InpRiskPercent>100.0)) return INIT_PARAMETERS_INCORRECT;
+   if(!InpUseRiskPercent && InpFixedLot<=0.0) return INIT_PARAMETERS_INCORRECT;
    if(InpUseFixedPointRR)
      {
       if(InpFixedSLPoints<=0 || InpFixedTPPoints<=0) return INIT_PARAMETERS_INCORRECT;
@@ -1149,7 +1254,9 @@ int OnInit()
    indicatorsReady=true; ResetDay(); EventSetTimer(1);
    if(InpEnableWebsiteSync && StringLen(InpWebsiteApiKey)<24)
       Print("Website sync belum dikonfigurasi: isi InpWebsiteApiKey dengan EA_API_KEY backend. Trading tetap berjalan tanpa sync.");
-   SetScanState("STARTING","EA Scalper single entry lot tetap siap; menunggu candle baru");
+   string lotMode=(InpUseRiskPercent ? StringFormat("risiko %.2f%% dari balance",InpRiskPercent) :
+                   StringFormat("lot tetap %.2f",InpFixedLot));
+   SetScanState("STARTING",StringFormat("EA Scalper 3.32 siap; %s; menunggu candle baru",lotMode));
    return INIT_SUCCEEDED;
   }
 
