@@ -18,7 +18,7 @@ from .client_plans import CLIENT_PLANS
 from .database import Base, SessionLocal, engine, get_db, migrate_schema
 from .models import AppSetting, EAExecution, ScalperTrade, Signal, Trade, utc_now
 from .public_realtime import public_performance_hub
-from .routers import auth, cs as cs_router, dashboard, ea, mt5 as mt5_router, parser as parser_router, payments as payments_router, public as public_router, settings, tg as tg_router
+from .routers import auth, cs as cs_router, dashboard, ea, mt5 as mt5_router, parser as parser_router, payments as payments_router, public as public_router, settings, tg as tg_router, wa_otp as wa_otp_router
 from .routers.mt5 import require_client_id
 from .registration import registration_is_open
 from .signal_service import SignalService
@@ -32,6 +32,7 @@ from .security import (
 from .stats_service import get_dashboard_stats
 from .time_utils import wib_iso
 from .payment_bot import payment_review_bot
+from .whatsapp_otp import whatsapp_otp_manager
 
 
 def migrate_legacy_scalper_trades(db: Session) -> None:
@@ -122,6 +123,7 @@ async def lifespan(_: FastAPI):
     try:
         await payment_review_bot.start()
         await telegram_manager.startup()
+        whatsapp_otp_manager.startup()
         yield
     finally:
         cs_cleanup_task.cancel()
@@ -131,6 +133,7 @@ async def lifespan(_: FastAPI):
             pass
         await payment_review_bot.shutdown()
         await telegram_manager.shutdown()
+        whatsapp_otp_manager.shutdown()
 
 
 app = FastAPI(
@@ -187,7 +190,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_response(_: Request, exc: RequestValidationError) -> JSONResponse:
-    # Do not echo submitted passwords, API keys, Telegram OTPs, or 2FA values.
+    # Do not echo submitted passwords, API keys, OTPs, or 2FA values.
     errors = [
         {"loc": error.get("loc", ()), "msg": error.get("msg", "Input tidak valid"), "type": error.get("type", "value_error")}
         for error in exc.errors()
@@ -235,6 +238,7 @@ app.include_router(dashboard.router, dependencies=[Depends(require_admin)])
 app.include_router(settings.router, dependencies=[Depends(require_admin)])
 app.include_router(parser_router.router, dependencies=[Depends(require_admin)])
 app.include_router(tg_router.router, dependencies=[Depends(require_admin)])
+app.include_router(wa_otp_router.router, dependencies=[Depends(require_admin)])
 app.include_router(ea.router)
 app.include_router(mt5_router.router)
 app.include_router(payments_router.router)
@@ -360,6 +364,15 @@ def parser_test_page(request: Request, _: str = Depends(require_admin)) -> HTMLR
 @app.get("/telegram-setup", response_class=HTMLResponse)
 def telegram_setup_page(request: Request, _: str = Depends(require_admin)) -> HTMLResponse:
     return templates.TemplateResponse(request=request, name="telegram_setup.html", context={"csrf_token": request.session["csrf_token"]})
+
+
+@app.get("/whatsapp-otp-setup", response_class=HTMLResponse)
+def whatsapp_otp_setup_page(request: Request, _: str = Depends(require_admin)) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request=request,
+        name="whatsapp_otp_setup.html",
+        context={"csrf_token": request.session["csrf_token"]},
+    )
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

@@ -60,12 +60,35 @@ def migrate_schema() -> None:
             with engine.begin() as connection:
                 for name, sql_type in missing.items():
                     connection.execute(text(f"ALTER TABLE signals ADD COLUMN {name} {sql_type}"))
+    if "client_users" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("client_users")}
+        additions = {
+            "email_verified_at": "DATETIME",
+            "phone": "VARCHAR(16)",
+            "phone_verified_at": "DATETIME",
+        }
+        missing = {name: sql_type for name, sql_type in additions.items() if name not in columns}
+        if missing:
+            with engine.begin() as connection:
+                for name, sql_type in missing.items():
+                    connection.execute(text(f"ALTER TABLE client_users ADD COLUMN {name} {sql_type}"))
+                if "email_verified_at" in missing:
+                    connection.execute(
+                        text("UPDATE client_users SET email_verified_at = verified_at WHERE email_verified_at IS NULL")
+                    )
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_client_users_phone "
+                "ON client_users(phone)"
+            ))
     if "email_verifications" in inspector.get_table_names():
         columns = {column["name"] for column in inspector.get_columns("email_verifications")}
         additions = {
             "send_count": "INTEGER NOT NULL DEFAULT 1",
             "send_window_started_at": "DATETIME",
             "locked_until": "DATETIME",
+            "channel": "VARCHAR(16) NOT NULL DEFAULT 'email'",
+            "phone": "VARCHAR(16)",
         }
         missing = {name: sql_type for name, sql_type in additions.items() if name not in columns}
         if missing:
@@ -74,6 +97,11 @@ def migrate_schema() -> None:
                     connection.execute(text(f"ALTER TABLE email_verifications ADD COLUMN {name} {sql_type}"))
     if "password_reset_codes" in inspector.get_table_names():
         columns = {column["name"] for column in inspector.get_columns("password_reset_codes")}
+        if "channel" not in columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE password_reset_codes ADD COLUMN channel VARCHAR(16) NOT NULL DEFAULT 'email'")
+                )
         if "last_activity_at" not in columns:
             with engine.begin() as connection:
                 connection.execute(

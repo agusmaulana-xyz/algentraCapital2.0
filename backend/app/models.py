@@ -146,10 +146,16 @@ class AdminUser(Base):
 
 class ClientUser(Base):
     __tablename__ = "client_users"
-    __table_args__ = (Index("ux_client_users_email", "email", unique=True),)
+    __table_args__ = (
+        Index("ux_client_users_email", "email", unique=True),
+        Index("ux_client_users_phone", "phone", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    phone_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -176,6 +182,8 @@ class EmailVerification(Base):
     __tablename__ = "email_verifications"
 
     email: Mapped[str] = mapped_column(String(320), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(16), default="email", nullable=False)
+    phone: Mapped[str | None] = mapped_column(String(16), nullable=True)
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -192,6 +200,7 @@ class PasswordResetCode(Base):
     __table_args__ = (Index("ix_password_reset_last_activity", "last_activity_at"),)
 
     email_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(16), default="email", nullable=False)
     code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     resend_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -201,6 +210,18 @@ class PasswordResetCode(Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class OtpDestinationLimit(Base):
+    """Global per-destination throttle for WhatsApp OTP delivery."""
+
+    __tablename__ = "otp_destination_limits"
+
+    destination_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    send_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resend_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MT5Account(Base):

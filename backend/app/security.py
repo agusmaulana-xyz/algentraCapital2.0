@@ -216,7 +216,7 @@ class RateLimitMiddleware:
             "/api/auth/password-reset/request",
         }:
             return 4, 60
-        if path in {"/api/auth/verify-email", "/api/auth/password-reset/confirm"}:
+        if path in {"/api/auth/verify-email", "/api/auth/verify-otp", "/api/auth/password-reset/confirm"}:
             return 10, 60
         if path in {"/api/ea/master/snapshot", "/api/mt5/follower/positions", "/api/mt5/follower/report"}:
             return 720, 60

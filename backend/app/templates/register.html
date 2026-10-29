@@ -5,23 +5,24 @@
 {% block content %}
 <main id="main" tabindex="-1" class="page-shell login-shell">
   <section class="login-card">
-    <span class="eyebrow">REGISTRASI KLIEN / VERIFIKASI EMAIL</span>
+    <span class="eyebrow">REGISTRASI KLIEN / VERIFIKASI KONTAK</span>
     <h1>Buat akun klien</h1>
-    <p class="page-description">Buat akun untuk menghubungkan akun Copy Trading MT5. Kode verifikasi akan dikirim ke email Anda.</p>
     <form id="register-form">
-      <label for="email">Email</label>
+      <label for="email">Email akun</label>
       <input id="email" type="email" autocomplete="email" required>
-      <label for="password">Kata sandi<small class="field-help">Minimal 8 karakter.</small></label>
+      <label for="phone">Nomor WhatsApp</label>
+      <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="628123456789" required>
+      <label for="password">Kata sandi</label>
       <input id="password" type="password" autocomplete="new-password" minlength="8" required>
-      <button type="submit">Kirim kode</button>
+      <button type="submit">Kirim kode WhatsApp</button>
     </form>
     <form id="verify-form" hidden>
-      <label for="code">Kode verifikasi<small class="field-help">Masukkan enam digit yang dikirim ke email. Kode berlaku 10 menit.</small></label>
+      <label for="code">Kode verifikasi</label>
       <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
-      <button type="submit">Verifikasi email</button>
+      <button type="submit">Verifikasi dan buat akun</button>
       <button id="resend" class="secondary" type="button">Kirim ulang kode</button>
     </form>
-    <p id="message" class="status" role="status"></p>
+    <p id="message" class="status" role="status" aria-live="polite"></p>
     <p class="muted">Sudah punya akun? <a href="/login">Masuk ke portal klien</a>.</p>
   </section>
 </main>
@@ -31,6 +32,7 @@
 const registerForm = document.querySelector("#register-form");
 const verifyForm = document.querySelector("#verify-form");
 const message = document.querySelector("#message");
+const phoneInput = document.querySelector("#phone");
 let pendingEmail = "";
 let pendingPassword = "";
 
@@ -45,6 +47,10 @@ async function post(path, body) {
   return result;
 }
 
+function deliveryHint() {
+  return "Jika data memenuhi syarat, kode verifikasi dikirim melalui WhatsApp.";
+}
+
 registerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   pendingEmail = document.querySelector("#email").value.trim();
@@ -52,11 +58,15 @@ registerForm.addEventListener("submit", async (event) => {
   const submitButton = registerForm.querySelector('button[type="submit"]');
   submitButton.disabled = true;
   try {
-    const result = await post("/api/auth/register", {email:pendingEmail, password:pendingPassword});
+    const result = await post("/api/auth/register", {
+      email: pendingEmail,
+      password: pendingPassword,
+      phone: phoneInput.value.trim()
+    });
     registerForm.hidden = true;
     verifyForm.hidden = false;
     startResendCountdown(document.querySelector("#resend"), result.retry_after_seconds, "Kirim ulang kode");
-    message.textContent = "Jika email memenuhi syarat, kode verifikasi sudah dikirim. Periksa kotak masuk dan folder spam.";
+    message.textContent = deliveryHint();
   } catch (error) {
     message.textContent = error.message;
     if (error.retryAfter) {
@@ -69,7 +79,7 @@ registerForm.addEventListener("submit", async (event) => {
 verifyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    await post("/api/auth/verify-email", {email:pendingEmail, code:document.querySelector("#code").value});
+    await post("/api/auth/verify-otp", {email:pendingEmail, code:document.querySelector("#code").value});
     location.assign("/account");
   } catch (error) {
     message.textContent = error.message;
@@ -84,7 +94,7 @@ document.querySelector("#resend").addEventListener("click", async () => {
   try {
     const result = await post("/api/auth/resend-code", {email:pendingEmail, password:pendingPassword});
     startResendCountdown(resendButton, result.retry_after_seconds, "Kirim ulang kode");
-    message.textContent = "Jika email memenuhi syarat, kode verifikasi sudah dikirim. Periksa kotak masuk dan folder spam.";
+    message.textContent = deliveryHint();
   } catch (error) {
     message.textContent = error.message;
     if (error.retryAfter) startResendCountdown(resendButton, error.retryAfter, "Kirim ulang kode");

@@ -152,7 +152,7 @@ def _asks_for_token(message: str) -> bool:
     explicit_token = any(term in lowered for term in ("token", "api key", "apikey", "accounttoken", "api-key"))
     if explicit_token:
         return True
-    if any(term in lowered for term in ("otp", "verifikasi", "kode email", "reset kata sandi")):
+    if any(term in lowered for term in ("otp", "verifikasi", "kode email", "kode whatsapp", "kode reset", "reset kata sandi")):
         return False
     mentions_code = any(term in lowered for term in ("kode", "kodenya", "kunci"))
     asks_how = any(term in lowered for term in ("masukin", "masukkan", "input", "isi", "pasang", "aktifkan", "mt5", "ea"))

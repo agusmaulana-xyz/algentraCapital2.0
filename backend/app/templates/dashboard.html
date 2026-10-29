@@ -6,6 +6,12 @@
 {% block content %}
 <main id="main" tabindex="-1" class="page-shell dashboard-page">
     <div class="page-heading"><div><span class="eyebrow">Algentra Capital / Operations</span><h1>Operations workspace</h1><p class="page-description">Pantau sinyal, hasil eksekusi, performa trade, dan batas risiko dalam satu tampilan.</p></div><div class="heading-aside">Internal workspace · access controlled</div></div>
+    <section aria-labelledby="whatsapp-otp-heading">
+      <span class="eyebrow">Client authentication</span>
+      <h2 id="whatsapp-otp-heading">OTP WhatsApp</h2>
+      <p class="section-help">Kelola sesi nomor pengirim OTP. QR pairing hanya tersedia setelah admin login.</p>
+      <a class="public-button secondary" href="/whatsapp-otp-setup">Buka status sesi dan QR</a>
+    </section>
     <section id="registration-controls" aria-labelledby="registration-controls-heading">
       <span class="eyebrow">Public site</span><h2 id="registration-controls-heading">Pendaftaran client</h2>
       <p id="registration-state" class="section-help" role="status">Memuat status pendaftaran...</p>
@@ -31,7 +37,7 @@
       <div class="card"><span>Pending</span><b id="signals-pending">&mdash;</b><small>Menunggu diklaim oleh EA.</small></div>
       <div class="card"><span>Ditolak / gagal</span><b id="signals-rejected">&mdash;</b><small>Periksa alasan pada log sistem.</small></div>
       <div class="card"><span>Diabaikan</span><b id="signals-ignored">&mdash;</b><small>Bukan sinyal atau tidak lolos aturan.</small></div>
-      <div class="card"><span>Total registrasi</span><b id="active-clients">&mdash;</b><small>Akun klien yang sudah verifikasi email.</small></div>
+      <div class="card"><span>Total registrasi</span><b id="active-clients">&mdash;</b><small>Akun klien yang sudah verifikasi kontak.</small></div>
       <div class="card"><span>Win / Loss</span><b id="wins-losses">&mdash;</b><small>Hasil trade yang sudah ditutup.</small></div>
       <div class="card"><span>Winrate</span><b id="winrate">&mdash;</b><small>Persentase hasil trade positif.</small></div>
       <div class="card"><span>Total profit</span><b id="total-profit">&mdash;</b><small>Profit terealisasi semua trade.</small></div>

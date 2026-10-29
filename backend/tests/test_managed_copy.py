@@ -329,8 +329,12 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
         assert ea_order_response.status_code == 201
         ea_order_id = ea_order_response.json()["id"]
         with SessionLocal() as db:
-            assert db.get(PendingMT5Verification, ea_check_id) is None
-            assert db.get(PaymentOrder, ea_order_id).prepayment_check_id is None
+            ea_check = db.get(PendingMT5Verification, ea_check_id)
+            assert ea_check is not None
+            assert ea_check.status == "CANCELLED"
+            assert ea_check.password_ciphertext == ""
+            assert ea_check.session_connected is False
+            assert db.get(PaymentOrder, ea_order_id).prepayment_check_id == ea_check_id
             order = db.get(PaymentOrder, ea_order_id)
             order.status = "PAYMENT_SUBMITTED"
             db.commit()

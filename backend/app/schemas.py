@@ -18,6 +18,7 @@ class ClientLoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=65536)
+    phone: str = Field(min_length=7, max_length=24)
 
 
 class ResendCodeRequest(BaseModel):
@@ -32,12 +33,14 @@ class VerifyEmailRequest(BaseModel):
 
 class PasswordResetRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
+    channel: Literal["email", "whatsapp"] = "email"
 
 
 class PasswordResetConfirmRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     code: str = Field(pattern=r"^\d{6}$")
     password: str = Field(min_length=8, max_length=65536)
+    channel: Literal["email", "whatsapp"] = "email"
 
 
 class MT5AccountCreate(BaseModel):

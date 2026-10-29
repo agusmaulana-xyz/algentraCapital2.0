@@ -222,6 +222,23 @@
     .plan-option .plan-option__name { color:var(--ink); font-size:15px; font-weight:800; }
     .plan-option strong { margin-top:auto; padding-top:8px; color:var(--ink); font-size:15px; }
     .plan-picker > .field-help { margin-bottom:0; }
+    .otp-channel-picker { min-width:0; margin:18px 0 10px; padding:0; border:0; }
+    .otp-channel-picker legend { margin-bottom:10px; color:var(--ink); font-size:13px; font-weight:750; }
+    .otp-channel-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .login-card form .otp-channel-option { position:relative; display:flex; min-width:0; min-height:76px; align-items:center; gap:10px; margin:0; padding:11px; border:1px solid var(--glass-border); border-radius:var(--radius-control); color:var(--ink); background:var(--glass-raised); cursor:pointer; transition:border-color var(--motion) ease, background-color var(--motion) ease, box-shadow var(--motion) ease; }
+    .otp-channel-option:hover { border-color:var(--control); }
+    .otp-channel-option:has(input:checked) { border-color:var(--action); background:color-mix(in srgb,var(--action) 8%,var(--glass-raised)); box-shadow:0 0 0 2px color-mix(in srgb,var(--action) 24%,transparent); }
+    .otp-channel-option:has(input:focus-visible) { outline:3px solid var(--focus); outline-offset:3px; }
+    .otp-channel-option input[type=radio] { position:absolute; width:1px; height:1px; min-height:0; margin:0; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+    .otp-channel-option__icon { display:grid; width:36px; height:36px; flex:none; place-items:center; border-radius:11px; color:var(--action); background:color-mix(in srgb,var(--action) 13%,var(--glass-raised)); }
+    .otp-channel-option__icon svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-linecap:round; stroke-linejoin:round; stroke-width:1.7; }
+    .otp-channel-option__copy { display:grid; min-width:0; gap:3px; }
+    .otp-channel-option__name { color:var(--ink); font-size:13px; font-weight:800; }
+    .otp-channel-option__indicator { display:grid; width:18px; height:18px; flex:none; margin-left:auto; place-items:center; border:1px solid var(--control); border-radius:50%; }
+    .otp-channel-option__indicator::after { width:6px; height:6px; border-radius:50%; background:var(--on-action); content:""; transform:scale(0); transition:transform var(--motion) ease; }
+    .otp-channel-option:has(input:checked) .otp-channel-option__indicator { border-color:var(--action); background:var(--action); }
+    .otp-channel-option:has(input:checked) .otp-channel-option__indicator::after { transform:scale(1); }
+    @media (max-width:390px) { .otp-channel-options { grid-template-columns:1fr; } }
     #message { min-height: 1.4em; color: var(--danger); }
     .music-toggle { position:fixed; right:20px; bottom:18px; z-index:20; display:flex; min-height:46px; align-items:center; gap:10px; padding:0 15px; border:1px solid var(--glass-border); border-radius:999px; color:var(--ink); background:var(--glass-surface); box-shadow:var(--shadow-soft); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px); font-size:11px; font-weight:750; letter-spacing:.02em; }
     .music-toggle:hover { border-color:#bdd6c0; color:#eff8f0; }
@@ -329,6 +346,7 @@
       <a class="nav-link {% if request.url.path == '/dashboard' %}active{% endif %}" href="/dashboard"><span>Workspace</span><small>Overview & activity</small></a>
       <a class="nav-link {% if request.url.path == '/parser-test' %}active{% endif %}" href="/parser-test"><span>Parser test</span><small>Review signal format</small></a>
       <a class="nav-link {% if request.url.path == '/telegram-setup' %}active{% endif %}" href="/telegram-setup"><span>Telegram</span><small>Connect & whitelist</small></a>
+      <a class="nav-link {% if request.url.path == '/whatsapp-otp-setup' %}active{% endif %}" href="/whatsapp-otp-setup"><span>OTP WhatsApp</span><small>QR & sesi bot</small></a>
       <a class="nav-link {% if request.url.path == '/dashboard' and request.url.fragment == 'settings' %}active{% endif %}" href="/dashboard#settings"><span>Controls</span><small>Risk & configuration</small></a>
       {% elif request.session.get('client_user_id') %}
       <a class="nav-link {% if request.url.path == '/account' %}active{% endif %}" href="/account"><span>Akun Copy Trading</span><small>Status akun MT5</small></a>

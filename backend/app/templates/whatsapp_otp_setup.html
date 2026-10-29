@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}OTP WhatsApp | Algentra Capital{% endblock %}
+{% block extra_head %}
+<style nonce="{{ request.state.csp_nonce }}">
+  .otp-qr-panel { max-width:420px; margin:22px auto; text-align:center; }
+  .otp-qr { display:block; width:min(100%,300px); height:auto; margin:auto; padding:12px; border-radius:12px; background:#fff; }
+</style>
+{% endblock %}
+{% block content %}
+<main id="main" tabindex="-1" class="page-shell dashboard-page">
+  <div class="page-heading">
+    <div>
+      <span class="eyebrow">ADMIN / OTP WHATSAPP</span>
+      <h1>Tautkan bot WhatsApp</h1>
+      <p class="page-description">Pindai QR dengan nomor WhatsApp khusus yang akan mengirim kode OTP klien.</p>
+    </div>
+    <a class="public-button secondary" href="/dashboard">Kembali ke workspace</a>
+  </div>
+
+  <section aria-labelledby="whatsapp-otp-status-heading">
+    <h2 id="whatsapp-otp-status-heading">Status sesi</h2>
+    <p id="whatsapp-otp-status" class="section-help" role="status" aria-live="polite">Memeriksa koneksi…</p>
+    <div class="toolbar">
+      <button id="whatsapp-connect" type="button">Hubungkan sesi tersimpan</button>
+      <button id="whatsapp-new-qr" class="secondary" type="button">Hapus sesi lama &amp; buat QR baru</button>
+      <button id="whatsapp-disconnect" class="secondary" type="button">Putuskan sesi</button>
+    </div>
+    <p id="whatsapp-otp-message" class="status" role="status" aria-live="polite"></p>
+    <p id="whatsapp-delivery-status" class="muted" role="status" aria-live="polite">Belum ada percobaan pengiriman OTP WhatsApp.</p>
+    <div id="whatsapp-qr-panel" class="card otp-qr-panel" hidden>
+      <img id="whatsapp-qr" class="otp-qr" alt="QR untuk menautkan bot WhatsApp OTP" width="300" height="300">
+      <p class="muted">Buka WhatsApp di ponsel → <strong>Perangkat tertaut</strong> → <strong>Tautkan perangkat</strong>, lalu pindai QR ini.</p>
+    </div>
+    <p class="muted">Setelah QR dipindai, Neonize menyimpan sesi pada database lokal backend dan memakainya kembali setelah restart. Pilih <strong>Hapus sesi lama &amp; buat QR baru</strong> jika ingin memasangkan ulang; tindakan ini menghapus sesi lokal yang tersimpan. Jangan bagikan QR atau file sesi.</p>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script nonce="{{ request.state.csp_nonce }}">
+const csrfToken = {{ csrf_token | tojson }};
+const statusLabel = document.querySelector("#whatsapp-otp-status");
+const messageLabel = document.querySelector("#whatsapp-otp-message");
+const deliveryLabel = document.querySelector("#whatsapp-delivery-status");
+const qrPanel = document.querySelector("#whatsapp-qr-panel");
+const qrImage = document.querySelector("#whatsapp-qr");
+const connectButton = document.querySelector("#whatsapp-connect");
+const newQrButton = document.querySelector("#whatsapp-new-qr");
+const disconnectButton = document.querySelector("#whatsapp-disconnect");
+
+async function request(path, method = "GET") {
+  const headers = {};
+  if (method !== "GET") headers["X-CSRF-Token"] = csrfToken;
+  const response = await fetch(path, {method, headers, cache:"no-store"});
+  const result = await parseApiResponse(response);
+  if (!response.ok) throw new Error(result.detail || "Permintaan gagal. Muat ulang halaman dan coba lagi.");
+  return result;
+}
+
+function renderStatus(data) {
+  statusLabel.textContent = data.message || "Status WhatsApp tidak tersedia.";
+  statusLabel.dataset.state = data.status || "unknown";
+  if (data.qr_data_uri) {
+    qrImage.src = data.qr_data_uri;
+    qrPanel.hidden = false;
+  } else {
+    qrImage.removeAttribute("src");
+    qrPanel.hidden = true;
+  }
+  connectButton.disabled = ["connecting", "waiting_qr", "connected", "stopping"].includes(data.status);
+  newQrButton.disabled = ["connecting", "stopping"].includes(data.status);
+  disconnectButton.disabled = ["not_started", "disconnected"].includes(data.status);
+  const purpose = data.last_delivery_purpose === "registration" ? "pendaftaran" : "reset sandi";
+  const attemptedAt = data.last_delivery_at
+    ? ` Percobaan dimulai ${new Date(data.last_delivery_at).toLocaleString()}.`
+    : "";
+  if (data.last_delivery_status === "sending") {
+    deliveryLabel.textContent = `Sedang mengirim OTP untuk ${purpose}…${attemptedAt}`;
+  } else if (data.last_delivery_status === "submitted") {
+    deliveryLabel.textContent = `Bot menyerahkan permintaan OTP untuk ${purpose} ke WhatsApp. Status ini belum memastikan pesan diterima atau dibaca penerima.${attemptedAt}`;
+  } else if (data.last_delivery_status === "failed") {
+    deliveryLabel.textContent = `Pengiriman OTP untuk ${purpose} gagal (${data.last_delivery_error || "error"}).${attemptedAt}`;
+  } else {
+    deliveryLabel.textContent = "Belum ada percobaan pengiriman OTP WhatsApp.";
+  }
+}
+
+async function refreshStatus() {
+  try {
+    renderStatus(await request("/api/whatsapp-otp/status"));
+  } catch (error) {
+    statusLabel.textContent = error.message;
+  }
+}
+
+connectButton.addEventListener("click", async () => {
+  connectButton.disabled = true;
+  messageLabel.textContent = "Memulai koneksi WhatsApp…";
+  try {
+    renderStatus(await request("/api/whatsapp-otp/connect", "POST"));
+    messageLabel.textContent = "";
+  } catch (error) {
+    messageLabel.textContent = error.message;
+    connectButton.disabled = false;
+  }
+});
+
+newQrButton.addEventListener("click", async () => {
+  if (!window.confirm("Sesi WhatsApp yang tersimpan akan dihapus dan koneksi aktif akan diputus. Buat QR baru sekarang?")) return;
+  newQrButton.disabled = true;
+  messageLabel.textContent = "Menghapus sesi lama dan meminta QR baru…";
+  try {
+    const data = await request("/api/whatsapp-otp/new-qr", "POST");
+    renderStatus(data);
+    messageLabel.textContent = data.status === "error" ? (data.error || data.message) : "Sesi lama dihapus. Menunggu QR baru…";
+  } catch (error) {
+    messageLabel.textContent = error.message;
+    newQrButton.disabled = false;
+  }
+});
+
+disconnectButton.addEventListener("click", async () => {
+  disconnectButton.disabled = true;
+  try {
+    renderStatus(await request("/api/whatsapp-otp/disconnect", "POST"));
+    messageLabel.textContent = "Sesi WhatsApp diputus.";
+  } catch (error) {
+    messageLabel.textContent = error.message;
+    disconnectButton.disabled = false;
+  }
+});
+
+refreshStatus();
+setInterval(refreshStatus, 1800);
+</script>
+{% endblock %}
