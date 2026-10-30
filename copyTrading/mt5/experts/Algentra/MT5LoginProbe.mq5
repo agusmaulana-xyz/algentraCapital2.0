@@ -1,36 +1,14 @@
 #property strict
-#property version   "1.007"
+#property version   "1.008"
 #property description "Reports isolated MT5 terminal login and trade readiness to the managed worker."
 
 input string ProbeStatusFileName = "algentra-login-probe.json";
 bool g_status_write_error_logged = false;
 string g_last_status_log = "";
 bool g_gold_chart_ready = false;
+string g_gold_symbol_candidate = "";
 datetime g_gold_chart_last_log = 0;
 datetime g_gold_chart_last_check = 0;
-
-bool AccountUsesCentSymbols()
-  {
-   string currency = AccountInfoString(ACCOUNT_CURRENCY);
-   StringToUpper(currency);
-   if(StringFind(currency, "CENT") >= 0 || currency == "USC" || currency == "USDC" || currency == "EUC" ||
-      currency == "GBC" || currency == "GBPC" || currency == "AUC" ||
-      currency == "AUDC" || currency == "CADC" || currency == "JPYC")
-      return true;
-   string identity = AccountInfoString(ACCOUNT_SERVER) + " " +
-                     AccountInfoString(ACCOUNT_COMPANY) + " " +
-                     AccountInfoString(ACCOUNT_NAME);
-   StringToUpper(identity);
-   return StringFind(identity, "CENT") >= 0;
-  }
-
-int GoldVariantRank(const string symbol)
-  {
-   string upper = symbol;
-   StringToUpper(upper);
-   string suffix = StringSubstr(upper, 6);
-   return suffix == "" ? 0 : 1;
-  }
 
 bool IsCurrencyCode(const string suffix)
   {
@@ -118,93 +96,71 @@ void WriteStatus(const bool ready, const bool valid, const string message)
 bool ResolveGoldSymbol(string &resolved)
   {
    resolved = "";
-   bool cent_account = AccountUsesCentSymbols();
-   string best = "";
-   string best_upper = "";
-   long best_quote_time = 0;
-   int best_history = 0; // 1 when the broker actually serves M1 bars for this symbol
-   int best_variant_rank = 2147483647;
-   int best_suffix_length = 2147483647;
+   string current_upper = _Symbol;
+   StringToUpper(current_upper);
+   int current_match = StringFind(current_upper, "XAUUSD");
+   if(current_match >= 0)
+     {
+      string current_suffix = StringSubstr(current_upper, current_match + 6);
+      if(StringLen(current_suffix) != 3 || !IsCurrencyCode(current_suffix))
+        {
+         if(SymbolSelect(_Symbol, true))
+           {
+            resolved = _Symbol;
+            return true;
+           }
+        }
+     }
    int symbols_total = SymbolsTotal(false);
    for(int i = 0; i < symbols_total; i++)
      {
       string candidate = SymbolName(i, false);
       string upper = candidate;
       StringToUpper(upper);
-      if(StringLen(candidate) < 6 || StringSubstr(upper, 0, 6) != "XAUUSD")
+      int match_at = StringFind(upper, "XAUUSD");
+      if(match_at < 0)
          continue;
-      string suffix = StringSubstr(upper, 6);
+      string suffix = StringSubstr(upper, match_at + 6);
       if(StringLen(suffix) == 3 && IsCurrencyCode(suffix))
          continue;
-      if(SymbolInfoInteger(candidate, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
-         continue;
-      // Select matching gold variants so MT5 can load quotes for the account's
-      // actual instrument before choosing between XAUUSD, XAUUSDc, XAUUSDm, etc.
-      SymbolSelect(candidate, true);
-      MqlTick tick;
-      long quote_time = 0;
-      if(SymbolInfoTick(candidate, tick) && tick.bid > 0.0 && tick.ask > 0.0)
-         quote_time = tick.time_msc > 0 ? tick.time_msc : (long)tick.time * 1000;
-      long server_now = (long)TimeTradeServer() * 1000;
-      // On weekends/closed sessions, stale ticks cannot identify the account's
-      // instrument. In that case prefer a broker suffix over the bare symbol.
-      if(server_now > 0 && quote_time < server_now - 30 * 60 * 1000)
-         quote_time = 0;
-      int suffix_length = StringLen(candidate) - 6;
-      int variant_rank = GoldVariantRank(candidate);
-      // Cent accounts often use a broker suffix for their account-specific
-      // gold contract. Prefer that variant when quote and history data tie.
-      if(cent_account && variant_rank == 0)
-         variant_rank = 1;
-      else if(cent_account)
-         variant_rank = 0;
-      // A symbol can exist in the broker catalog (e.g. bare XAUUSD) without the
-      // account receiving any data for it, which gives a black chart. Symbols
-      // that actually have bars always outrank those that do not.
-      int history = SeriesInfoInteger(candidate, PERIOD_M1, SERIES_BARS_COUNT) > 0 ? 1 : 0;
-      bool better = (best == "");
-      if(best != "")
-        {
-         bool same_data = (history == best_history && quote_time == best_quote_time);
-         if(quote_time > best_quote_time ||
-            (quote_time == best_quote_time && history > best_history) ||
-            (same_data && variant_rank < best_variant_rank) ||
-            (same_data && variant_rank == best_variant_rank && suffix_length < best_suffix_length) ||
-            (same_data && variant_rank == best_variant_rank && suffix_length == best_suffix_length && upper < best_upper))
-            better = true;
-        }
-      if(better)
-        {
-         best = candidate;
-         best_upper = upper;
-         best_history = history;
-         best_quote_time = quote_time;
-         best_variant_rank = variant_rank;
-         best_suffix_length = suffix_length;
-        }
+      // A single name search is enough: the broker supplies the exact suffix
+      // (XAUUSDc, XAUUSDm, XAUUSD.c, etc.). Do not probe quotes or test every
+      // matching chart; select the first matching instrument and stop.
+      resolved = candidate;
+      break;
      }
-   if(best == "" || !SymbolSelect(best, true))
+   if(resolved == "")
       return false;
-   resolved = best;
+   ResetLastError();
+   if(!SymbolSelect(resolved, true))
+     {
+      Print("[MT5LoginProbe] tidak dapat menampilkan simbol XAUUSD ", resolved,
+            " di Market Watch; error ", GetLastError());
+      resolved = "";
+      return false;
+     }
    return true;
   }
 
 void EnsureDefaultGoldChart()
   {
-   if(g_gold_chart_ready && TimeCurrent() - g_gold_chart_last_check < 10)
+   if(g_gold_chart_ready || TimeCurrent() - g_gold_chart_last_check < 10)
       return;
    g_gold_chart_last_check = TimeCurrent();
 
-   string gold_symbol;
-   if(!ResolveGoldSymbol(gold_symbol))
+   if(g_gold_symbol_candidate == "")
      {
-      if(TimeCurrent() - g_gold_chart_last_log >= 15)
+      if(!ResolveGoldSymbol(g_gold_symbol_candidate))
         {
-         Print("[MT5LoginProbe] XAUUSD belum ditemukan di daftar simbol broker.");
-         g_gold_chart_last_log = TimeCurrent();
+         if(TimeCurrent() - g_gold_chart_last_log >= 15)
+           {
+            Print("[MT5LoginProbe] simbol yang mengandung XAUUSD belum ditemukan di broker.");
+            g_gold_chart_last_log = TimeCurrent();
+           }
+         return;
         }
-      return;
      }
+   string gold_symbol = g_gold_symbol_candidate;
    if(_Symbol == gold_symbol && _Period == PERIOD_M1)
      {
       g_gold_chart_ready = true;
@@ -214,7 +170,8 @@ void EnsureDefaultGoldChart()
    if(ChartSetSymbolPeriod(0, gold_symbol, PERIOD_M1))
      {
       g_gold_chart_ready = true;
-      Print("[MT5LoginProbe] chart probe memakai ", gold_symbol, ", M1.");
+      Print("[MT5LoginProbe] simbol XAUUSD ditemukan: ", gold_symbol,
+            "; chart dipilih dan EA probe dijalankan pada M1.");
      }
    else if(TimeCurrent() - g_gold_chart_last_log >= 15)
      {
@@ -250,8 +207,10 @@ void OnTimer()
       message = "Login broker tersambung, tetapi izin trading Expert Advisor belum aktif.";
    else if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       message = "Login broker tersambung, tetapi izin Auto Trading terminal belum aktif.";
-   WriteStatus(true, true, message);
    // Connection validation does not wait for symbol resolution. Resolve and select
    // the broker's available XAUUSD variant after the live session is reported.
    EnsureDefaultGoldChart();
+   if(g_gold_symbol_candidate != "")
+      message += " Simbol XAUUSD terdeteksi: " + g_gold_symbol_candidate + ".";
+   WriteStatus(true, true, message);
   }
