@@ -1,5 +1,8 @@
 """Isolated Neonize session and WhatsApp OTP delivery for the client portal."""
 
+from __future__ import annotations
+
+import json
 import logging
 import multiprocessing
 import os
@@ -9,15 +12,14 @@ from pathlib import Path
 from queue import Empty
 import threading
 from time import monotonic
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import segno
-from neonize.client import NewClient
-from neonize.events import ConnectedEv, ConnectFailureEv, DisconnectedEv
-from neonize.ext.interactive_message import ButtonMessage
-from neonize.utils.jid import build_jid
 
 from .config import PROJECT_ROOT
+from .whatsapp_worker_protocol import WORKER_BASE_URL, WORKER_KEY_HEADER, worker_api_key
 
 
 logger = logging.getLogger("algentra.whatsapp_otp")
@@ -30,6 +32,8 @@ def _qr_text(data: bytes | str) -> str:
 
 
 def _send_otp_message(client: NewClient, phone: str, code: str, purpose: str) -> None:
+    from neonize.utils.jid import build_jid
+
     purpose_text = (
         "menyelesaikan pendaftaran akun"
         if purpose == "registration"
@@ -42,19 +46,21 @@ def _send_otp_message(client: NewClient, phone: str, code: str, purpose: str) ->
         "Jika Anda tidak meminta kode ini, abaikan pesan ini."
     )
     destination = build_jid(phone)
-    message = (
-        ButtonMessage()
-        .set_title("Kode keamanan Algentra")
-        .set_body(body)
-        .set_footer("Jika Anda tidak meminta kode ini, abaikan pesan ini.")
-        .add_copy("Salin OTP", code)
-    )
     try:
+        from neonize.ext.interactive_message import ButtonMessage
+
+        message = (
+            ButtonMessage()
+            .set_title("Kode keamanan Algentra")
+            .set_body(body)
+            .set_footer("Jika Anda tidak meminta kode ini, abaikan pesan ini.")
+            .add_copy("Salin OTP", code)
+        )
         client.send_interactive_message(destination, message)
     except Exception as exc:
-        # Some WhatsApp clients reject this interactive format. Keep delivery working.
+        # Keep OTP delivery available for WhatsApp clients that reject the button.
         logger.warning(
-            "Tombol salin OTP ditolak (%s); mencoba mengirim teks biasa.",
+            "Tombol salin OTP ditolak (%s); mengirim OTP sebagai teks biasa.",
             type(exc).__name__,
         )
         client.send_message(destination, body)
@@ -84,6 +90,9 @@ def _whatsapp_worker(
     response_queue: Queue,
 ) -> None:
     """Own Neonize in a child process so a stuck Go FFI call can be terminated safely."""
+    from neonize.client import NewClient
+    from neonize.events import ConnectedEv, ConnectFailureEv, DisconnectedEv
+
     try:
         client = NewClient(session_path, new_device=new_device)
     except Exception as exc:
@@ -151,8 +160,9 @@ def _whatsapp_worker(
 
 
 class WhatsAppOtpManager:
-    def __init__(self, session_path: Path = SESSION_PATH) -> None:
+    def __init__(self, session_path: Path = SESSION_PATH, *, remote: bool = False) -> None:
         self.session_path = session_path
+        self.remote = remote
         self._lock = threading.RLock()
         self._lifecycle_lock = threading.RLock()
         self._rpc_lock = threading.Lock()
@@ -171,17 +181,29 @@ class WhatsAppOtpManager:
 
     @property
     def is_connected(self) -> bool:
+        if self.remote:
+            return bool(self.status().get("connected"))
         self._drain_events()
         with self._lock:
             return self._state == "connected" and self._process is not None and self._process.is_alive()
 
     def startup(self) -> None:
+        if self.remote:
+            return
         self.connect()
 
     def shutdown(self) -> None:
+        if self.remote:
+            return
         self.disconnect()
 
     def connect(self, *, new_device: bool = False) -> dict[str, str]:
+        if self.remote:
+            try:
+                self._request_remote("POST", "/new-qr" if new_device else "/connect", timeout=20)
+            except RuntimeError:
+                pass
+            return self.status()
         with self._lifecycle_lock:
             self._drain_events()
             with self._lock:
@@ -342,6 +364,12 @@ class WhatsAppOtpManager:
         return True
 
     def disconnect(self) -> dict[str, str]:
+        if self.remote:
+            try:
+                self._request_remote("POST", "/disconnect", timeout=20)
+            except RuntimeError:
+                pass
+            return self.status()
         with self._lifecycle_lock:
             self._drain_events()
             self._set_state("stopping")
@@ -353,6 +381,12 @@ class WhatsAppOtpManager:
 
     def reset_session(self) -> dict[str, str]:
         """Stop the isolated worker, remove its SQLite session, and start fresh pairing."""
+        if self.remote:
+            try:
+                self._request_remote("POST", "/new-qr", timeout=25)
+            except RuntimeError:
+                pass
+            return self.status()
         with self._lifecycle_lock:
             self._drain_events()
             was_connected = self.is_connected
@@ -380,6 +414,14 @@ class WhatsAppOtpManager:
             return self.connect(new_device=True)
 
     def send_otp(self, phone: str, code: str, purpose: str) -> None:
+        if self.remote:
+            self._request_remote(
+                "POST",
+                "/send-otp",
+                {"phone": phone, "code": code, "purpose": purpose},
+                timeout=60,
+            )
+            return
         purpose_label = "registration" if purpose == "registration" else "password_reset"
         if not self.is_connected:
             with self._lock:
@@ -409,6 +451,21 @@ class WhatsAppOtpManager:
             self._last_delivery_error = None
 
     def status(self) -> dict[str, str | bool | None]:
+        if self.remote:
+            try:
+                return self._request_remote("GET", "/status")
+            except RuntimeError:
+                return {
+                    "status": "error",
+                    "connected": False,
+                    "message": "Worker WhatsApp tidak berjalan. Mulai ulang layanan melalui run.bat.",
+                    "qr_data_uri": None,
+                    "error": "worker_unavailable",
+                    "last_delivery_status": None,
+                    "last_delivery_purpose": None,
+                    "last_delivery_error": "worker_unavailable",
+                    "last_delivery_at": None,
+                }
         self._drain_events()
         with self._lock:
             state = self._state
@@ -448,6 +505,40 @@ class WhatsAppOtpManager:
             "last_delivery_at": last_delivery_at,
         }
 
+    @staticmethod
+    def _request_remote(
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        *,
+        timeout: float = 6,
+    ) -> dict:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else None
+        request = Request(
+            f"{WORKER_BASE_URL}{path}",
+            data=body,
+            headers={
+                "Accept": "application/json",
+                WORKER_KEY_HEADER: worker_api_key(),
+                **({"Content-Type": "application/json"} if body is not None else {}),
+            },
+            method=method,
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("detail")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                detail = None
+            raise RuntimeError(str(detail or f"WhatsApp worker returned HTTP {exc.code}")) from exc
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Worker WhatsApp tidak dapat dijangkau") from exc
+        if not isinstance(result, dict):
+            raise RuntimeError("Respons worker WhatsApp tidak valid")
+        return result
+
     def _restrict_session_directory(self) -> None:
         if os.name == "nt":
             return
@@ -457,4 +548,4 @@ class WhatsAppOtpManager:
             logger.warning("Tidak dapat membatasi izin folder sesi WhatsApp.")
 
 
-whatsapp_otp_manager = WhatsAppOtpManager()
+whatsapp_otp_manager = WhatsAppOtpManager(remote=True)

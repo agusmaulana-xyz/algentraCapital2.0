@@ -227,6 +227,8 @@ class ManagedWorker:
         self.reports_dir = self.runtime_dir / "reports"
         self.states_dir = self.runtime_dir / "states"
         self.master_status_path = self.runtime_dir / "master-status.json"
+        stop_file_value = os.environ.get("ALGENTRA_COPY_WORKER_STOP_FILE")
+        self.stop_file = Path(stop_file_value).resolve() if stop_file_value else None
         for directory in (self.logs_dir, self.configs_dir, self.terminals_dir, self.heartbeats_dir, self.reports_dir, self.states_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -288,6 +290,7 @@ class ManagedWorker:
         return {
             key: value for key, value in self.parent_environment.items()
             if key != self.config["worker_api_key_env"]
+            and key != "ALGENTRA_COPY_WORKER_STOP_FILE"
             and not any(marker in key.upper() for marker in sensitive_markers)
         }
 
@@ -958,11 +961,20 @@ class ManagedWorker:
         logger.info("Managed copier worker dimulai")
         try:
             while not self.stopping:
+                if self._consume_stop_request():
+                    logger.info("Permintaan stop dari run.bat diterima")
+                    break
                 try:
                     self.sync_once()
                 except RuntimeError as exc:
                     logger.warning("Sinkronisasi managed copier gagal: %s", exc)
-                time.sleep(self.config["poll_seconds"])
+                wake_at = time.monotonic() + self.config["poll_seconds"]
+                while not self.stopping and time.monotonic() < wake_at:
+                    if self._consume_stop_request():
+                        logger.info("Permintaan stop dari run.bat diterima")
+                        self.stopping = True
+                        break
+                    time.sleep(min(0.5, max(0.0, wake_at - time.monotonic())))
         except KeyboardInterrupt:
             logger.info("Ctrl+C diterima")
         finally:
@@ -971,6 +983,18 @@ class ManagedWorker:
                 self._stop_job(account_id)
             self._stop(self.master_process)
             logger.info("Managed copier worker berhenti")
+
+    def _consume_stop_request(self) -> bool:
+        if self.stop_file is None:
+            return False
+        try:
+            if not self.stop_file.is_file():
+                return False
+            self.stop_file.unlink(missing_ok=True)
+            return True
+        except OSError as exc:
+            logger.warning("Stop file copier tidak dapat dibaca (%s)", type(exc).__name__)
+            return False
 
 
 def main() -> None:

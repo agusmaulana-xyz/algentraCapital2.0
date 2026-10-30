@@ -269,9 +269,11 @@ const $ = (selector) => document.querySelector(selector);
       $("#registration-open").disabled=registrationOpen;
       $("#registration-close").disabled=!registrationOpen;
     }
-    function renderPaymentState(paymentsEnabled) {
+    function renderPaymentState(paymentsEnabled, airpayConfigured=true) {
       $("#payment-state").textContent=paymentsEnabled
-        ? "Pembayaran aktif. Client melanjutkan ke pembayaran setelah verifikasi MT5."
+        ? airpayConfigured
+          ? "Pembayaran aktif. Client melanjutkan ke pembayaran setelah verifikasi MT5."
+          : "Pembayaran tersimpan aktif, tetapi AirPay belum dikonfigurasi sehingga checkout belum siap."
         : "Pembayaran nonaktif. Akun client baru langsung dibuat setelah verifikasi MT5.";
       $("#payment-on").disabled=paymentsEnabled;
       $("#payment-off").disabled=!paymentsEnabled;
@@ -279,7 +281,7 @@ const $ = (selector) => document.querySelector(selector);
     async function loadSettings() {
       const settings=await api("/api/settings");
       renderRegistrationState(settings.registration_open ?? true);
-      renderPaymentState(settings.payments_enabled ?? true);
+      renderPaymentState(settings.payments_enabled ?? true, settings.airpay_configured ?? false);
       $("#confidence-threshold").value=settings.confidence_threshold ?? 0.75;
       $("#symbol-mapping").value=JSON.stringify(settings.symbol_mapping ?? {GOLD:"XAUUSD",XAU:"XAUUSD",EMAS:"XAUUSD"},null,2);
       $("#max-market-deviation").value=settings.max_market_deviation_pct ?? 5;
@@ -308,19 +310,27 @@ const $ = (selector) => document.querySelector(selector);
       buttons.forEach((button)=>button.disabled=true);
       message.textContent="Menyimpan status pembayaran...";
       try {
-        await api("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:{payments_enabled:enabled}})});
+        const saved=await api("/api/settings",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({values:{payments_enabled:enabled}})});
+        renderPaymentState(saved.payments_enabled, true);
         message.textContent=enabled ? "Pembayaran diaktifkan." : "Pembayaran dimatikan. Akun baru akan langsung dibuat setelah verifikasi MT5.";
-        await loadSettings();
       } catch(error) {
         message.textContent=`Gagal mengubah status pembayaran: ${error.message}`;
-        buttons.forEach((button)=>button.disabled=false);
+        try { await loadSettings(); }
+        catch (_) { buttons.forEach((button)=>button.disabled=true); }
       }
+    }
+    async function refreshPaymentState() {
+      try {
+        const status=await api("/api/payments/status",{cache:"no-store"});
+        renderPaymentState(status.payments_enabled !== false, status.airpay_configured === true);
+      } catch (_) {}
     }
     setInterval(async()=>{
       if(document.hidden) return;
       try { const status=await api("/api/public/registration-status"); renderRegistrationState(status.registration_open); }
       catch(_) {}
     },10000);
+    setInterval(()=>{if(!document.hidden) refreshPaymentState();},10000);
     async function refresh() {
       try { await Promise.all([loadStatsAndSignals(),loadGroups(),loadScalperStats(),loadEALicenseKeys(),loadLogs(),loadTrades()]); }
       catch(error) { $("#connection").textContent=`Gagal memuat: ${error.message}`; }

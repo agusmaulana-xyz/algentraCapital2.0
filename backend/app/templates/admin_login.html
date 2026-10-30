@@ -6,13 +6,26 @@
   <section class="login-card">
     <span class="eyebrow">ALGENTRA CAPITAL / PRIVATE ACCESS</span>
     <h1>Admin Login</h1>
-    <p class="page-description">Masuk ke workspace operasional.</p>
     <form id="admin-login-form">
       <label for="username">Username</label>
       <input id="username" autocomplete="username" required>
       <label for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" required>
       <button type="submit">Login</button>
+      <div class="auth-loading" hidden role="status" aria-live="polite">
+        <svg class="auth-loading__chart" viewBox="0 0 112 48" aria-hidden="true">
+          <path class="auth-loading__grid" d="M2 8H110M2 24H110M2 40H110M2 2V46M38 2V46M74 2V46M110 2V46" />
+          <rect class="auth-loading__bars" x="9" y="31" width="5" height="11" rx="1" />
+          <rect class="auth-loading__bars" x="27" y="26" width="5" height="16" rx="1" />
+          <rect class="auth-loading__bars" x="45" y="30" width="5" height="12" rx="1" />
+          <rect class="auth-loading__bars" x="63" y="20" width="5" height="22" rx="1" />
+          <rect class="auth-loading__bars" x="81" y="25" width="5" height="17" rx="1" />
+          <rect class="auth-loading__bars" x="99" y="16" width="5" height="26" rx="1" />
+          <path class="auth-loading__line" d="M3 28L18 20L32 25L47 13L61 18L77 8L91 14L108 5" />
+          <circle class="auth-loading__point" cx="108" cy="5" r="3" />
+        </svg>
+        <span class="auth-loading__copy"><strong>Memeriksa akses admin</strong><span>Mohon tunggu sebentar...</span></span>
+      </div>
       <p id="admin-message" class="status" role="status"></p>
     </form>
   </section>
@@ -22,7 +35,16 @@
 <script nonce="{{ request.state.csp_nonce }}">
 document.querySelector("#admin-login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  const form = event.currentTarget;
+  if (form.dataset.submitting === "true") return;
   const message = document.querySelector("#admin-message");
+  const button = form.querySelector('button[type="submit"]');
+  const loading = form.querySelector(".auth-loading");
+  form.dataset.submitting = "true";
+  button.disabled = true;
+  loading.hidden = false;
+  message.textContent = "";
+  let redirecting = false;
   try {
     const response = await fetch("/api/auth/login", {
       method: "POST",
@@ -34,9 +56,16 @@ document.querySelector("#admin-login-form").addEventListener("submit", async (ev
     });
     const result = await parseApiResponse(response);
     if (!response.ok) throw new Error(result.detail || "Login gagal.");
+    redirecting = true;
     location.assign("/dashboard");
   } catch (error) {
     message.textContent = error.message;
+  } finally {
+    if (!redirecting) {
+      delete form.dataset.submitting;
+      button.disabled = false;
+      loading.hidden = true;
+    }
   }
 });
 </script>

@@ -6,6 +6,7 @@ import secrets
 from datetime import datetime, timedelta
 from math import ceil
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
@@ -56,6 +57,65 @@ SEND_LIMIT = 3
 CODE_LIFETIME = timedelta(minutes=10)
 CODE_ATTEMPT_LIMIT = 3
 PHONE_SEND_LIMIT = 3
+TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+
+def _verify_turnstile(request: Request, token: str, action: str) -> None:
+    settings = get_settings()
+    secret = settings.turnstile_secret_for_validation
+    if not secret:
+        logger.error("Turnstile credentials are missing in production.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Verifikasi keamanan belum tersedia. Hubungi admin.",
+        )
+    if not token.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Selesaikan verifikasi keamanan terlebih dahulu.",
+        )
+
+    try:
+        response = httpx.post(
+            TURNSTILE_VERIFY_URL,
+            json={"secret": secret, "response": token.strip()},
+            timeout=httpx.Timeout(6.0, connect=2.0),
+        )
+        response.raise_for_status()
+        result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Turnstile verification unavailable (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Verifikasi keamanan gagal terhubung. Coba lagi.",
+        ) from exc
+
+    if not isinstance(result, dict) or result.get("success") is not True:
+        errors = result.get("error-codes", []) if isinstance(result, dict) else []
+        if not isinstance(errors, list):
+            errors = []
+        safe_errors = ",".join(str(code) for code in errors if isinstance(code, str))[:160]
+        logger.warning("Turnstile validation rejected (action=%s, errors=%s)", action, safe_errors or "unknown")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verifikasi keamanan gagal atau kedaluwarsa. Coba lagi.",
+        )
+
+    if not settings.turnstile_test_mode:
+        expected_hostname = (request.url.hostname or "").casefold()
+        actual_hostname = result.get("hostname")
+        if not expected_hostname or not isinstance(actual_hostname, str) or actual_hostname.casefold() != expected_hostname:
+            logger.warning("Turnstile validation rejected (action=%s, reason=hostname_mismatch)", action)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verifikasi keamanan tidak cocok dengan situs ini. Coba lagi.",
+            )
+        if result.get("action") != action:
+            logger.warning("Turnstile validation rejected (action=%s, reason=action_mismatch)", action)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verifikasi keamanan tidak cocok dengan formulir ini. Coba lagi.",
+            )
 
 
 def _set_session_expiry(request: Request, max_age: int, remember_client: bool = False) -> None:
@@ -232,9 +292,10 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
 
 
 @router.post("/register", status_code=status.HTTP_202_ACCEPTED)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> dict[str, str | int]:
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str | int]:
     if not registration_is_open(db):
         raise HTTPException(status_code=403, detail="Pendaftaran client sedang ditutup. Silakan tunggu pengumuman launching.")
+    _verify_turnstile(request, payload.captcha_token, "register")
     email = _normalized_email(payload.email)
     settings = get_settings()
     channel = "whatsapp"
@@ -246,7 +307,11 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> dict[st
     db.execute(text("BEGIN IMMEDIATE"))
     if db.execute(select(ClientUser.id).where(ClientUser.email == email)).first():
         db.rollback()
-        return {"status": "verification_sent", "retry_after_seconds": int(RESEND_INTERVAL.total_seconds())}
+        logger.warning("Registration WhatsApp OTP skipped (reason=email_already_registered).")
+        raise HTTPException(
+            status_code=409,
+            detail="Email ini sudah terdaftar. Silakan masuk atau gunakan reset kata sandi.",
+        )
 
     now = utc_now()
     db.query(OtpDestinationLimit).filter(
@@ -256,13 +321,18 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> dict[st
     if phone:
         if db.execute(select(ClientUser.id).where(ClientUser.phone == phone)).first():
             db.rollback()
-            return {"status": "verification_sent", "retry_after_seconds": int(RESEND_INTERVAL.total_seconds())}
+            logger.warning("Registration WhatsApp OTP skipped (reason=phone_already_registered).")
+            raise HTTPException(
+                status_code=409,
+                detail="Nomor WhatsApp ini sudah terdaftar. Gunakan nomor lain atau reset kata sandi akun tersebut.",
+            )
         destination_hash, phone_wait = _reserve_phone_destination(db, phone, now)
         if phone_wait:
             db.rollback()
+            logger.warning("Registration WhatsApp OTP skipped (reason=phone_cooldown, retry_after_seconds=%s).", phone_wait)
             raise HTTPException(
                 status_code=429,
-                detail="Pengiriman OTP ke nomor ini dibatasi. Coba lagi nanti.",
+                detail="Nomor WhatsApp ini baru saja menerima permintaan OTP. Tunggu sebelum mencoba lagi.",
                 headers={"Retry-After": str(phone_wait)},
             )
 
@@ -274,7 +344,8 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> dict[st
     wait = _send_wait_seconds(pending, now) if pending else 0
     if wait:
         db.rollback()
-        return {"status": "verification_sent", "retry_after_seconds": wait}
+        logger.warning("Registration WhatsApp OTP skipped (reason=registration_cooldown, retry_after_seconds=%s).", wait)
+        return {"status": "verification_pending", "retry_after_seconds": wait}
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     code_hash = _verification_hash(email, code)
@@ -325,9 +396,15 @@ def resend_code(payload: ResendCodeRequest, db: Session = Depends(get_db)) -> di
     settings = get_settings()
     db.execute(text("BEGIN IMMEDIATE"))
     pending = db.get(EmailVerification, email)
-    if pending is None or db.execute(select(ClientUser.id).where(ClientUser.email == email)).first():
+    if pending is None:
+        existing_user = db.execute(select(ClientUser.id).where(ClientUser.email == email)).first()
         db.rollback()
-        return {"status": "verification_sent", "retry_after_seconds": int(RESEND_INTERVAL.total_seconds())}
+        if existing_user:
+            raise HTTPException(status_code=409, detail="Email ini sudah terdaftar. Silakan masuk atau reset kata sandi.")
+        raise HTTPException(status_code=409, detail="Tidak ada pendaftaran yang menunggu OTP. Mulai pendaftaran dari awal.")
+    if db.execute(select(ClientUser.id).where(ClientUser.email == email)).first():
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Akun sudah dibuat. Silakan masuk atau reset kata sandi.")
     channel = "whatsapp"
     phone = pending.phone
     if not phone:
@@ -344,13 +421,13 @@ def resend_code(payload: ResendCodeRequest, db: Session = Depends(get_db)) -> di
         db.rollback()
         raise HTTPException(
             status_code=429,
-            detail="Pengiriman OTP ke nomor ini dibatasi. Coba lagi nanti.",
+            detail="Nomor WhatsApp ini baru saja menerima permintaan OTP. Tunggu sebelum mencoba lagi.",
             headers={"Retry-After": str(phone_wait)},
         )
     wait = _send_wait_seconds(pending, now)
     if wait:
         db.rollback()
-        return {"status": "verification_sent", "retry_after_seconds": wait}
+        return {"status": "verification_pending", "retry_after_seconds": wait}
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     code_hash = _verification_hash(email, code)
@@ -561,6 +638,7 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest, db: Session = D
 
 @router.post("/client-login")
 def client_login(payload: ClientLoginRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, str | int]:
+    _verify_turnstile(request, payload.captcha_token, "client_login")
     email = _normalized_email(payload.email)
     user = db.execute(select(ClientUser).where(ClientUser.email == email)).scalar_one_or_none()
     password_valid = verify_password(payload.password, user.password_hash if user else DUMMY_PASSWORD_HASH)

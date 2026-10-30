@@ -402,6 +402,8 @@ def configure_managed_copy(
         raise HTTPException(status_code=409, detail="Jeda copy trading sebelum mengubah pengaturan akun")
     if profile is None and not payload.broker_password:
         raise HTTPException(status_code=422, detail="Password trading broker diperlukan untuk menghubungkan akun pertama kali")
+    if profile is not None and payload.broker_password:
+        raise HTTPException(status_code=422, detail="Password broker hanya dapat diisi saat menghubungkan akun pertama kali")
     values = payload.model_dump(exclude={"broker_password"})
     if profile is None:
         profile = ManagedCopyProfile(
@@ -416,14 +418,7 @@ def configure_managed_copy(
     else:
         for key, value in values.items():
             setattr(profile, key, value)
-        if payload.broker_password:
-            profile.password_ciphertext = encrypt_managed_copy_password(payload.broker_password)
-            profile.prepayment_check_id = None
-            profile.login_status = "CHECKING"
-            profile.login_message = "Memeriksa login dan koneksi akun MT5."
-            profile.status = "STARTING"
-            profile.status_message = None
-        elif profile.login_status == "VALID":
+        if profile.login_status == "VALID":
             profile.status = "STANDBY"
             profile.status_message = "Copy trading off. Terminal tetap tersambung dan saldo disinkronkan."
     profile.active = False

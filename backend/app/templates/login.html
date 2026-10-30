@@ -1,18 +1,39 @@
 {% extends "base.html" %}
 {% block title %}Masuk | Algentra Capital{% endblock %}
+{% block extra_head %}
+{% if turnstile_site_key %}<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer nonce="{{ request.state.csp_nonce }}"></script>{% endif %}
+{% endblock %}
 {% block content %}
 <main id="main" tabindex="-1" class="page-shell login-shell">
   <section class="login-card">
     <span class="eyebrow">PORTAL KLIEN / MASUK</span>
     <h1>Masuk ke akun</h1>
-    <p class="page-description">Kelola akun Copy Trading MT5 dan pantau koneksinya.</p>
     <form id="client-login-form">
       <label for="email">Email</label>
       <input id="email" type="email" autocomplete="email" required>
       <label for="password">Kata sandi</label>
       <input id="password" type="password" autocomplete="current-password" required>
       <div class="toolbar"><label><input id="remember-me" type="checkbox"> Biarkan saya tetap masuk selama 30 hari</label></div>
-      <button type="submit">Masuk</button>
+      {% if turnstile_site_key %}
+      <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-action="{{ turnstile_action }}" data-theme="auto" data-language="id" data-appearance="always"></div>
+      {% else %}
+      <p class="status" role="status">Verifikasi keamanan belum tersedia. Silakan hubungi admin.</p>
+      {% endif %}
+      <button type="submit" {% if not turnstile_site_key %}disabled{% endif %}>Masuk</button>
+      <div class="auth-loading" hidden role="status" aria-live="polite">
+        <svg class="auth-loading__chart" viewBox="0 0 112 48" aria-hidden="true">
+          <path class="auth-loading__grid" d="M2 8H110M2 24H110M2 40H110M2 2V46M38 2V46M74 2V46M110 2V46" />
+          <rect class="auth-loading__bars" x="9" y="31" width="5" height="11" rx="1" />
+          <rect class="auth-loading__bars" x="27" y="26" width="5" height="16" rx="1" />
+          <rect class="auth-loading__bars" x="45" y="30" width="5" height="12" rx="1" />
+          <rect class="auth-loading__bars" x="63" y="20" width="5" height="22" rx="1" />
+          <rect class="auth-loading__bars" x="81" y="25" width="5" height="17" rx="1" />
+          <rect class="auth-loading__bars" x="99" y="16" width="5" height="26" rx="1" />
+          <path class="auth-loading__line" d="M3 28L18 20L32 25L47 13L61 18L77 8L91 14L108 5" />
+          <circle class="auth-loading__point" cx="108" cy="5" r="3" />
+        </svg>
+        <span class="auth-loading__copy"><strong>Memeriksa akses</strong><span>Mohon tunggu sebentar...</span></span>
+      </div>
       <p id="client-message" class="status" role="status"></p>
     </form>
     <p class="muted"><a href="/forgot-password">Lupa kata sandi?</a></p>
@@ -24,22 +45,42 @@
 <script nonce="{{ request.state.csp_nonce }}">
 async function submitLogin(event, endpoint, payload, messageId, destination) {
   event.preventDefault();
+  const form = event.currentTarget;
   const message = document.querySelector(messageId);
+  if (form.dataset.submitting === "true") return;
+  const button = form.querySelector('button[type="submit"]');
+  const loading = form.querySelector(".auth-loading");
+  form.dataset.submitting = "true";
+  button.disabled = true;
+  loading.hidden = false;
+  message.textContent = "";
+  let redirecting = false;
   try {
     const response = await fetch(endpoint, {
       method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
     });
     const result = await parseApiResponse(response);
     if (!response.ok) throw new Error(result.detail || "Gagal masuk. Periksa kembali email dan kata sandi Anda.");
+    redirecting = true;
     location.assign(destination);
-  } catch (error) { message.textContent = error.message; }
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    if (!redirecting) {
+      delete form.dataset.submitting;
+      button.disabled = false;
+      loading.hidden = true;
+      if (window.turnstile) window.turnstile.reset();
+    }
+  }
 }
 document.querySelector("#client-login-form").addEventListener("submit", (event) => submitLogin(
   event, "/api/auth/client-login",
   {
     email: document.querySelector("#email").value,
     password: document.querySelector("#password").value,
-    remember_me: document.querySelector("#remember-me").checked
+    remember_me: document.querySelector("#remember-me").checked,
+    captcha_token: document.querySelector('[name="cf-turnstile-response"]')?.value || ""
   },
   "#client-message", "/account"
 ));

@@ -12,14 +12,13 @@
     <div>
       <span class="eyebrow">ADMIN / OTP WHATSAPP</span>
       <h1>Tautkan bot WhatsApp</h1>
-      <p class="page-description">Pindai QR dengan nomor WhatsApp khusus yang akan mengirim kode OTP klien.</p>
     </div>
     <a class="public-button secondary" href="/dashboard">Kembali ke workspace</a>
   </div>
 
   <section aria-labelledby="whatsapp-otp-status-heading">
     <h2 id="whatsapp-otp-status-heading">Status sesi</h2>
-    <p id="whatsapp-otp-status" class="section-help" role="status" aria-live="polite">Memeriksa koneksi…</p>
+    <p id="whatsapp-otp-status" class="status" role="status" aria-live="polite">Memeriksa koneksi…</p>
     <div class="toolbar">
       <button id="whatsapp-connect" type="button">Hubungkan sesi tersimpan</button>
       <button id="whatsapp-new-qr" class="secondary" type="button">Hapus sesi lama &amp; buat QR baru</button>
@@ -29,9 +28,7 @@
     <p id="whatsapp-delivery-status" class="muted" role="status" aria-live="polite">Belum ada percobaan pengiriman OTP WhatsApp.</p>
     <div id="whatsapp-qr-panel" class="card otp-qr-panel" hidden>
       <img id="whatsapp-qr" class="otp-qr" alt="QR untuk menautkan bot WhatsApp OTP" width="300" height="300">
-      <p class="muted">Buka WhatsApp di ponsel → <strong>Perangkat tertaut</strong> → <strong>Tautkan perangkat</strong>, lalu pindai QR ini.</p>
     </div>
-    <p class="muted">Setelah QR dipindai, Neonize menyimpan sesi pada database lokal backend dan memakainya kembali setelah restart. Pilih <strong>Hapus sesi lama &amp; buat QR baru</strong> jika ingin memasangkan ulang; tindakan ini menghapus sesi lokal yang tersimpan. Jangan bagikan QR atau file sesi.</p>
   </section>
 </main>
 {% endblock %}

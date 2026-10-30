@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Buat akun klien | Algentra Capital{% endblock %}
 {% block meta_description %}Buat akun klien Algentra Capital untuk menghubungkan akun broker MetaTrader 5 dan mempelajari layanan copy trading XAUUSD.{% endblock %}
-{% block extra_head %}<link rel="canonical" href="{{ site_origin }}/register">{% endblock %}
+{% block extra_head %}
+<link rel="canonical" href="{{ site_origin }}/register">
+{% if turnstile_site_key %}<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer nonce="{{ request.state.csp_nonce }}"></script>{% endif %}
+{% endblock %}
 {% block content %}
 <main id="main" tabindex="-1" class="page-shell login-shell">
   <section class="login-card">
@@ -14,7 +17,12 @@
       <input id="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="628123456789" required>
       <label for="password">Kata sandi</label>
       <input id="password" type="password" autocomplete="new-password" minlength="8" required>
-      <button type="submit">Kirim kode WhatsApp</button>
+      {% if turnstile_site_key %}
+      <div class="cf-turnstile" data-sitekey="{{ turnstile_site_key }}" data-action="{{ turnstile_action }}" data-theme="auto" data-language="id" data-appearance="always"></div>
+      {% else %}
+      <p class="status" role="status">Verifikasi keamanan belum tersedia. Silakan hubungi admin.</p>
+      {% endif %}
+      <button type="submit" {% if not turnstile_site_key %}disabled{% endif %}>Kirim kode WhatsApp</button>
     </form>
     <form id="verify-form" hidden>
       <label for="code">Kode verifikasi</label>
@@ -41,14 +49,25 @@ async function post(path, body) {
   const result = await parseApiResponse(response);
   if (!response.ok) {
     const error = new Error(result.detail || "Permintaan gagal. Coba lagi.");
+    error.status = response.status;
     error.retryAfter = Number(response.headers.get("Retry-After")) || Number(result.retry_after_seconds) || 0;
     throw error;
   }
   return result;
 }
 
-function deliveryHint() {
-  return "Jika data memenuhi syarat, kode verifikasi dikirim melalui WhatsApp.";
+function deliveryHint(result) {
+  if (result.status === "verification_pending") {
+    return "OTP sebelumnya masih dalam jeda kirim. Periksa WhatsApp atau tunggu sebelum meminta ulang.";
+  }
+  return "Jika email dan nomor belum terdaftar, OTP akan dikirim ke WhatsApp. Jika akun sudah ada, gunakan reset kata sandi.";
+}
+
+function showVerificationForm(result) {
+  registerForm.hidden = true;
+  verifyForm.hidden = false;
+  startResendCountdown(document.querySelector("#resend"), result.retry_after_seconds, "Kirim ulang kode");
+  message.textContent = deliveryHint(result);
 }
 
 registerForm.addEventListener("submit", async (event) => {
@@ -61,19 +80,20 @@ registerForm.addEventListener("submit", async (event) => {
     const result = await post("/api/auth/register", {
       email: pendingEmail,
       password: pendingPassword,
-      phone: phoneInput.value.trim()
+      phone: phoneInput.value.trim(),
+      captcha_token: registerForm.querySelector('[name="cf-turnstile-response"]')?.value || ""
     });
-    registerForm.hidden = true;
-    verifyForm.hidden = false;
-    startResendCountdown(document.querySelector("#resend"), result.retry_after_seconds, "Kirim ulang kode");
-    message.textContent = deliveryHint();
+    showVerificationForm(result);
   } catch (error) {
     message.textContent = error.message;
     if (error.retryAfter) {
       const targetButton = verifyForm.hidden ? submitButton : document.querySelector("#resend");
       startResendCountdown(targetButton, error.retryAfter, verifyForm.hidden ? "Kirim kode" : "Kirim ulang kode");
     }
-  } finally { if (!submitButton._resendTimer) submitButton.disabled = false; }
+  } finally {
+    if (window.turnstile) window.turnstile.reset();
+    if (!submitButton._resendTimer) submitButton.disabled = false;
+  }
 });
 
 verifyForm.addEventListener("submit", async (event) => {
@@ -94,9 +114,13 @@ document.querySelector("#resend").addEventListener("click", async () => {
   try {
     const result = await post("/api/auth/resend-code", {email:pendingEmail, password:pendingPassword});
     startResendCountdown(resendButton, result.retry_after_seconds, "Kirim ulang kode");
-    message.textContent = deliveryHint();
+    message.textContent = deliveryHint(result);
   } catch (error) {
     message.textContent = error.message;
+    if (error.status === 409) {
+      verifyForm.hidden = true;
+      registerForm.hidden = false;
+    }
     if (error.retryAfter) startResendCountdown(resendButton, error.retryAfter, "Kirim ulang kode");
     else resendButton.disabled = false;
   }

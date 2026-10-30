@@ -13,12 +13,14 @@ class ClientLoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=65536)
     remember_me: bool = False
+    captcha_token: str = Field(default="", max_length=2048)
 
 
 class RegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=65536)
     phone: str = Field(min_length=7, max_length=24)
+    captcha_token: str = Field(default="", max_length=2048)
 
 
 class ResendCodeRequest(BaseModel):

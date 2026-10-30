@@ -25,7 +25,7 @@ if not exist ".env" (
 
 "%PYTHON_EXE%" %PYTHON_ARGS% --version
 if errorlevel 1 goto :python_error
-"%PYTHON_EXE%" %PYTHON_ARGS% -c "import fastapi, uvicorn" >nul 2>&1
+"%PYTHON_EXE%" %PYTHON_ARGS% -c "import MetaTrader5, fastapi, neonize, segno, uvicorn" >nul 2>&1
 if errorlevel 1 goto :dependency_error
 
 set "ALGENTRA_PORT=8000"
@@ -35,9 +35,9 @@ if not errorlevel 1 (
   goto :port_error
 )
 
-echo Starting Algentra Capital at http://127.0.0.1:%ALGENTRA_PORT% ...
-echo Keep this window open while the backend is running. Press Ctrl+C to stop it.
-"%PYTHON_EXE%" %PYTHON_ARGS% -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port %ALGENTRA_PORT% --proxy-headers --forwarded-allow-ips=127.0.0.1 --reload --reload-dir backend
+echo Starting Algentra Capital and its worker processes...
+echo WhatsApp and copy trading workers open in separate terminals. Press Ctrl+C here to stop all.
+"%PYTHON_EXE%" %PYTHON_ARGS% run-all.py --reload
 set "APP_EXIT_CODE=%ERRORLEVEL%"
 if not "%APP_EXIT_CODE%"=="0" (
   echo.
@@ -53,10 +53,10 @@ echo and a strong ADMIN_PASSWORD (12+ characters). See README.md for setup.
 goto :failed
 
 :dependency_error
-echo ERROR: FastAPI or Uvicorn is missing from the selected Python environment.
-echo Create .venv and install the backend dependencies:
+echo ERROR: A backend, WhatsApp, or MT5 copy worker dependency is missing.
+echo Install the backend dependencies and the copyTrading package:
 echo   py -3 -m venv .venv
-echo   .venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+echo   .venv\Scripts\python.exe -m pip install -r backend\requirements.txt -e copyTrading
 goto :failed
 
 :python_error

@@ -83,12 +83,12 @@ def payment_status(db: Session = Depends(get_db)) -> dict[str, bool]:
     """Expose only the payment availability flag needed by the client form."""
     item = db.get(AppSetting, "payments_enabled")
     if item is None:
-        return {"payments_enabled": True}
+        return {"payments_enabled": True, "airpay_configured": get_settings().airpay_configured}
     try:
         enabled = json.loads(item.value)
     except (TypeError, json.JSONDecodeError):
         enabled = True
-    return {"payments_enabled": enabled is not False}
+    return {"payments_enabled": enabled is not False, "airpay_configured": get_settings().airpay_configured}
 
 
 @router.get("/orders")
@@ -139,6 +139,33 @@ def create_payment_order(
 
     # Serialize order creation so simultaneous tabs cannot exceed the account limit.
     db.execute(text("BEGIN IMMEDIATE"))
+    # The browser may lose the response after the order commits. Reusing the
+    # same verified prepayment check must return that order instead of failing
+    # because the check has already been consumed.
+    existing_order = db.execute(
+        select(PaymentOrder).where(
+            PaymentOrder.owner_id == owner_id,
+            PaymentOrder.prepayment_check_id == payload.prepayment_check_id,
+        )
+    ).scalar_one_or_none()
+    if existing_order is not None:
+        same_request = (
+            existing_order.label == label
+            and existing_order.server.casefold() == server.casefold()
+            and existing_order.login == login
+            and existing_order.plan == payload.plan
+            and existing_order.execution_mode == payload.execution_mode
+        )
+        if same_request and existing_order.status in (*ACTIVE_ORDER_STATUSES, "APPROVED"):
+            result = _order_payload(existing_order)
+            db.commit()
+            return result
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Sesi verifikasi MT5 ini sudah digunakan. Periksa kembali pesanan di riwayat transaksi atau verifikasi ulang akun.",
+        )
+
     payment_setting = db.get(AppSetting, "payments_enabled")
     try:
         payments_enabled = json.loads(payment_setting.value) is not False if payment_setting else True
@@ -328,9 +355,10 @@ async def create_airpay_invoice(
         raise HTTPException(status_code=409, detail="Tagihan QRIS sedang dibuat. Tunggu sebentar lalu muat ulang.")
     if not order.airpay_external_id:
         order.airpay_external_id = f"ALG-{order.id}-{secrets.token_hex(6).upper()}"
+    attempt_started_at = utc_now()
     order.airpay_status = "CREATING"
     order.payment_message = None
-    order.updated_at = utc_now()
+    order.updated_at = attempt_started_at
     external_id = order.airpay_external_id
     amount = order.total_idr
     db.commit()
@@ -348,7 +376,23 @@ async def create_airpay_invoice(
         current = db.execute(
             select(PaymentOrder).where(PaymentOrder.id == order_id, PaymentOrder.owner_id == owner_id)
         ).scalar_one_or_none()
-        if current is not None and current.status == "PENDING_PAYMENT":
+        if (
+            current is not None
+            and current.status == "PENDING_PAYMENT"
+            and current.airpay_transaction_id
+            and current.airpay_merchant_uid
+        ):
+            # A newer retry may have succeeded while this older request was
+            # waiting on AirPay. Keep the invoice that was already committed.
+            result = _order_payload(current)
+            db.commit()
+            return result
+        if (
+            current is not None
+            and current.status == "PENDING_PAYMENT"
+            and current.airpay_status == "CREATING"
+            and _aware(current.updated_at) == attempt_started_at
+        ):
             current.airpay_status = "ERROR"
             current.payment_message = str(exc)[:240]
             current.updated_at = utc_now()
@@ -367,6 +411,12 @@ async def create_airpay_invoice(
     if current.status != "PENDING_PAYMENT":
         db.rollback()
         raise HTTPException(status_code=409, detail="Pesanan berubah saat tagihan QRIS dibuat")
+    if current.airpay_transaction_id and current.airpay_merchant_uid:
+        # Another request completed the same idempotent invoice first. Never
+        # replace its stored transaction with a late response.
+        result = _order_payload(current)
+        db.commit()
+        return result
     _store_airpay_invoice(current, invoice)
     db.commit()
     return _order_payload(current)

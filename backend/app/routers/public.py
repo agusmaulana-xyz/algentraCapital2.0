@@ -377,6 +377,16 @@ def brand_logo_image() -> FileResponse:
     )
 
 
+@router.get("/favicon.svg", include_in_schema=False)
+def favicon_image() -> FileResponse:
+    image_path = PROJECT_ROOT / "backend" / "app" / "static" / "algentra-favicon.svg"
+    return FileResponse(
+        image_path,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"},
+    )
+
+
 @router.get("/musik.mp3", include_in_schema=False)
 def site_music() -> FileResponse:
     return FileResponse(PROJECT_ROOT / "musik.mp3", media_type="audio/mpeg")

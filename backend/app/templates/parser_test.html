@@ -5,16 +5,15 @@
 {% endblock %}
 {% block content %}
 <main id="main" tabindex="-1" class="page-shell">
-    <div class="page-heading"><div><span class="eyebrow">Signal lab</span><h1>Tes Parser Signal</h1><p class="page-description">Uji format pesan sebelum mengaktifkan whitelist. Hasil ini hanya validasi parser dan tidak mengirim order ke MT5.</p></div></div>
+    <div class="page-heading"><div><span class="eyebrow">Signal lab</span><h1>Tes Parser Signal</h1></div></div>
     <form id="parser-form">
-      <label for="message">Pesan baru<small class="field-help">Tempel pesan signal asli; format rentang seperti 4100:::4093 atau 4000-4010 menjadi zona; zona mengesampingkan kata BUY NOW/SELL NOW.</small></label>
+      <label for="message">Pesan baru</label>
       <textarea id="message" required placeholder="Contoh: XAUUSD BUY 4100:::4093, TP 4120, SL 4085"></textarea>
-      <label for="context">Konteks pesan sebelumnya (opsional)<small class="field-help">Isi hanya jika pesan terbaru melanjutkan arah/simbol dari pesan sebelumnya.</small></label>
+      <label for="context">Konteks pesan sebelumnya (opsional)</label>
       <textarea id="context" placeholder="Contoh: BUY NOW"></textarea>
       <button type="submit">Parse pesan</button>
     </form>
     <h2>Hasil parsing</h2>
-    <p class="section-help">Periksa action, order type, zona entry, SL/TP, status validasi, dan alasan sebelum memakai sumber ini.</p>
     <pre id="result" aria-live="polite">Masukkan pesan untuk menguji parser.</pre>
   </main>
 {% endblock %}

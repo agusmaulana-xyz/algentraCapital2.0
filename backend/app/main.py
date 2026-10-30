@@ -123,7 +123,6 @@ async def lifespan(_: FastAPI):
     try:
         await payment_review_bot.start()
         await telegram_manager.startup()
-        whatsapp_otp_manager.startup()
         yield
     finally:
         cs_cleanup_task.cancel()
@@ -133,7 +132,6 @@ async def lifespan(_: FastAPI):
             pass
         await payment_review_bot.shutdown()
         await telegram_manager.shutdown()
-        whatsapp_otp_manager.shutdown()
 
 
 app = FastAPI(
@@ -171,7 +169,7 @@ class SecurityHeadersMiddleware:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 headers.extend([
-                    (b"content-security-policy", f"default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss:; script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net; style-src 'self' 'nonce-{nonce}'; form-action 'self'".encode("ascii")),
+                    (b"content-security-policy", f"default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: wss: https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; script-src 'self' 'nonce-{nonce}' https://cdn.jsdelivr.net https://challenges.cloudflare.com; style-src 'self' 'nonce-{nonce}'; form-action 'self'".encode("ascii")),
                     (b"x-frame-options", b"DENY"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
@@ -249,6 +247,15 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "algentra-capital"}
 
 
+def _turnstile_page_context(action: str) -> dict[str, str | None]:
+    settings = get_settings()
+    test_mode = settings.turnstile_test_mode
+    return {
+        "turnstile_site_key": settings.turnstile_site_key_for_client,
+        "turnstile_action": "test" if test_mode else action,
+    }
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)):
     if isinstance(request.session.get("client_user_id"), int):
@@ -258,7 +265,7 @@ def login_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(
         request=request,
         name="login.html",
-        context={"registration_open": registration_is_open(db)},
+        context={"registration_open": registration_is_open(db), **_turnstile_page_context("client_login")},
     )
 
 
@@ -276,7 +283,11 @@ def register_page(request: Request, db: Session = Depends(get_db)) -> HTMLRespon
     return templates.TemplateResponse(
         request=request,
         name="register.html",
-        context={"registration_open": True, "site_origin": public_router.public_site_origin()},
+        context={
+            "registration_open": True,
+            "site_origin": public_router.public_site_origin(),
+            **_turnstile_page_context("register"),
+        },
     )
 
 

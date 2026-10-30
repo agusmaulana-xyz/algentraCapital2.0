@@ -7,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TURNSTILE_TEST_SITE_KEY = "1x00000000000000000000AA"
+TURNSTILE_TEST_SECRET_KEY = "1x0000000000000000000000000000000AA"
 
 
 class Settings(BaseSettings):
@@ -54,6 +56,8 @@ class Settings(BaseSettings):
     contact_x: str | None = Field(default=None, validation_alias="CONTACT_X")
     contact_youtube: str | None = Field(default=None, validation_alias="CONTACT_YOUTUBE")
     contact_tiktok: str | None = Field(default=None, validation_alias="CONTACT_TIKTOK")
+    turnstile_site_key: str | None = Field(default=None, validation_alias="TURNSTILE_SITE_KEY")
+    turnstile_secret_key: SecretStr | None = Field(default=None, validation_alias="TURNSTILE_SECRET_KEY")
     database_url: str | None = Field(default=None, validation_alias="DATABASE_URL")
     airpay_base_url: str | None = Field(default=None, validation_alias="AIRPAY_BASE_URL")
     airpay_api_key: SecretStr | None = Field(default=None, validation_alias="AIRPAY_API_KEY")
@@ -83,6 +87,22 @@ class Settings(BaseSettings):
             raise ValueError("GEMINI_MODEL cannot be empty")
         if not self.gemini_cs_model.strip():
             raise ValueError("GEMINI_CS_MODEL cannot be empty")
+        if (self.turnstile_site_key is None) != (self.turnstile_secret_key is None):
+            raise ValueError("TURNSTILE_SITE_KEY dan TURNSTILE_SECRET_KEY harus diisi bersamaan")
+        if self.turnstile_site_key is not None and (
+            not self.turnstile_site_key.strip()
+            or self.turnstile_secret_key is None
+            or not self.turnstile_secret_key.get_secret_value().strip()
+        ):
+            raise ValueError("Kunci Turnstile tidak boleh kosong atau hanya berisi spasi")
+        if self.app_env == "production" and (
+            self.turnstile_site_key == TURNSTILE_TEST_SITE_KEY
+            or (
+                self.turnstile_secret_key is not None
+                and self.turnstile_secret_key.get_secret_value() == TURNSTILE_TEST_SECRET_KEY
+            )
+        ):
+            raise ValueError("Kunci uji Turnstile tidak boleh digunakan di production")
         if self.airpay_base_url:
             parsed_airpay_url = urlsplit(self.airpay_base_url.strip())
             if (
@@ -133,6 +153,25 @@ class Settings(BaseSettings):
     @property
     def email_configured(self) -> bool:
         return all((self.email_smtp_host, self.email_smtp_username, self.email_smtp_password, self.email_from))
+
+    @property
+    def turnstile_site_key_for_client(self) -> str | None:
+        if self.turnstile_site_key:
+            return self.turnstile_site_key.strip()
+        return TURNSTILE_TEST_SITE_KEY if self.app_env == "development" else None
+
+    @property
+    def turnstile_secret_for_validation(self) -> str | None:
+        if self.turnstile_secret_key:
+            return self.turnstile_secret_key.get_secret_value().strip()
+        return TURNSTILE_TEST_SECRET_KEY if self.app_env == "development" else None
+
+    @property
+    def turnstile_test_mode(self) -> bool:
+        return self.app_env == "development" and (
+            self.turnstile_site_key is None
+            or self.turnstile_site_key.strip() == TURNSTILE_TEST_SITE_KEY
+        )
 
     @property
     def airpay_configured(self) -> bool:

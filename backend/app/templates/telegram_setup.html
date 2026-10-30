@@ -5,26 +5,24 @@
 {% endblock %}
 {% block content %}
 <main id="main" tabindex="-1" class="page-shell">
-    <div class="page-heading"><div><span class="eyebrow">Signal sources</span><h1>Telegram Setup</h1><p class="page-description">Hubungkan akun sumber, pilih grup yang boleh dibaca, dan beri alias agar sinyal mudah dilacak.</p></div><p id="status" class="heading-aside">Status: memeriksa...</p></div>
+    <div class="page-heading"><div><span class="eyebrow">Signal sources</span><h1>Telegram Setup</h1></div><p id="status" class="heading-aside">Status: memeriksa...</p></div>
     <section id="login">
       <h2>Hubungkan akun</h2>
-      <p class="section-help">Masuk dengan nomor Telegram dalam format internasional. Kode login dan 2FA hanya dipakai untuk menghubungkan session lokal.</p>
-      <label for="phone">Nomor telepon (format internasional)<small class="field-help">Kode login Telegram akan dikirim ke aplikasi Telegram akun ini.</small></label>
+      <label for="phone">Nomor telepon</label>
       <input id="phone" class="phone-input" autocomplete="tel" placeholder="+628123456789">
       <button id="send-code">Kirim kode Telegram</button>
       <div id="code-step" hidden>
-        <label for="code">Kode Telegram<small class="field-help">Masukkan kode yang diterima untuk menyelesaikan login.</small></label>
+        <label for="code">Kode Telegram</label>
         <input id="code" autocomplete="one-time-code" inputmode="numeric">
         <button id="verify-code">Verifikasi kode</button>
       </div>
       <div id="password-step" hidden>
-        <label for="password">Password 2FA<small class="field-help">Isi hanya jika verifikasi dua langkah aktif pada akun.</small></label>
+        <label for="password">Password 2FA</label>
         <input id="password" type="password" autocomplete="current-password">
         <button id="verify-password">Verifikasi 2FA</button>
       </div>
     </section>
     <section>
-      <p class="section-help">Reconnect memulihkan koneksi; Logout Telegram mencabut session lokal; Muat grup mengambil daftar grup terbaru.</p>
       <button id="reconnect" class="secondary">Reconnect</button>
       <button id="telegram-logout" class="secondary">Logout Telegram</button>
       <button id="refresh-groups" class="secondary">Muat grup</button>
@@ -32,7 +30,6 @@
     <p id="notice" role="status"></p>
     <section>
       <h2>Grup dan channel</h2>
-      <p class="section-help">Centang sumber sinyal yang dipercaya. Alias hanya mengubah nama tampilan, bukan ID grup Telegram.</p>
       <div id="groups">Login untuk memuat daftar grup.</div>
       <button id="save-groups">Simpan whitelist</button>
     </section>

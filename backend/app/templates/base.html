@@ -7,6 +7,7 @@
   <meta name="description" content="{% block meta_description %}{% if request.session.get('admin_username') %}Algentra Capital menyediakan layanan copy trading XAUUSD dengan sistematisasi berbasis AI, transparansi, dan kontrol risiko.{% else %}Algentra Capital membantu membaca sinyal XAUUSD dengan AI, menjalankan instruksi melalui EA MetaTrader, dan menyalin posisi ke akun Copy Trading.{% endif %}{% endblock %}">
   <meta name="robots" content="{% if request.url.path in ['/', '/performance', '/register'] %}index,follow,max-image-preview:large{% else %}noindex,follow{% endif %}">
   <meta name="theme-color" content="#0d1a24">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=1">
   <link rel="icon" type="image/png" sizes="512x512" href="/brand-logo.png">
   <link rel="apple-touch-icon" sizes="512x512" href="/brand-logo.png">
   <title>{% block title %}Algentra Capital | AI Copy Trading{% endblock %}</title>
@@ -211,6 +212,27 @@
     .login-card form { margin-top: 20px; }
     .login-card form label { margin: 13px 0; }
     .login-card button { width: 100%; margin-top: 10px; }
+    .auth-loading { display:flex; align-items:center; gap:13px; margin-top:14px; padding:11px 13px; border:1px solid var(--line); border-radius:var(--radius-control); background:var(--glass-raised); }
+    .auth-loading[hidden] { display:none; }
+    .form-grid > .auth-loading { grid-column:1 / -1; }
+    .auth-loading__chart { display:block; flex:0 0 88px; width:88px; height:42px; overflow:visible; }
+    .auth-loading__grid { fill:none; stroke:var(--line); stroke-width:1; opacity:.72; }
+    .auth-loading__bars { fill:var(--gold); opacity:.42; transform-box:fill-box; transform-origin:center bottom; animation:auth-volume 1.1s ease-in-out infinite alternate; }
+    .auth-loading__bars:nth-of-type(2) { animation-delay:.15s; }
+    .auth-loading__bars:nth-of-type(3) { animation-delay:.3s; }
+    .auth-loading__bars:nth-of-type(4) { animation-delay:.45s; }
+    .auth-loading__line { fill:none; stroke:var(--gold); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:145; stroke-dashoffset:145; animation:auth-chart-draw 1.8s ease-in-out infinite; }
+    .auth-loading__point { fill:var(--gold); transform-box:fill-box; transform-origin:center; animation:auth-point-pulse 1s ease-in-out infinite alternate; }
+    .auth-loading__copy { display:grid; gap:3px; }
+    .auth-loading__copy strong { color:var(--ink); font-size:12px; }
+    .auth-loading__copy span { color:var(--muted); font-size:11px; }
+    @keyframes auth-chart-draw { 0% { stroke-dashoffset:145; opacity:.55; } 70%,100% { stroke-dashoffset:0; opacity:1; } }
+    @keyframes auth-volume { from { transform:scaleY(.48); opacity:.25; } to { transform:scaleY(1); opacity:.62; } }
+    @keyframes auth-point-pulse { from { transform:scale(.82); opacity:.65; } to { transform:scale(1.22); opacity:1; } }
+    @media (prefers-reduced-motion:reduce) {
+      .auth-loading__bars, .auth-loading__line, .auth-loading__point { animation:none; }
+      .auth-loading__line { stroke-dashoffset:0; }
+    }
     .plan-picker { min-width:0; margin:0 0 18px; padding:0; border:0; }
     .account-connect-form .plan-picker { grid-column:1 / -1; margin:0 0 4px; }
     .plan-picker legend { margin-bottom:10px; color:var(--ink); font-size:13px; font-weight:750; }

@@ -4,6 +4,7 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from dotenv import set_key
 
@@ -84,6 +85,7 @@ def read_settings(db: Session = Depends(get_db)) -> dict[str, object]:
     config = get_settings()
     values.setdefault("entry_mode", "PARTIAL")
     values.setdefault("payments_enabled", True)
+    values["airpay_configured"] = config.airpay_configured
     values[REGISTRATION_OPEN_KEY] = registration_is_open(db)
     values["gemini_configured"] = bool(config.gemini_api_key and config.gemini_api_key.get_secret_value())
     values["gemini_model"] = config.gemini_model
@@ -112,22 +114,40 @@ def update_gemini_config(payload: GeminiConfigUpdate) -> dict[str, object]:
 def update_settings(payload: SettingsUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     if len(payload.values) > 100:
         raise HTTPException(status_code=422, detail="Maksimal 100 setting per permintaan")
+    normalized_values: dict[str, object] = {}
     for key, value in payload.values.items():
         if not key.strip() or len(key) > 128:
             raise HTTPException(status_code=422, detail="Nama setting harus berisi 1-128 karakter")
         if key not in ALLOWED_SETTINGS:
             raise HTTPException(status_code=422, detail=f"Setting '{key}' tidak dapat diubah dari dashboard")
         normalized = _validate_setting(key, value)
+        if key == "payments_enabled" and normalized and not get_settings().airpay_configured:
+            raise HTTPException(
+                status_code=409,
+                detail="AirPay belum dikonfigurasi. Isi AIRPAY_BASE_URL dan AIRPAY_API_KEY sebelum mengaktifkan pembayaran.",
+            )
         encoded = json.dumps(normalized, ensure_ascii=False, allow_nan=False)
         if len(encoded) > 10_000:
             raise HTTPException(status_code=422, detail=f"Nilai setting '{key}' terlalu besar")
-        if key == REGISTRATION_OPEN_KEY:
-            set_registration_open(db, normalized)
-        else:
-            item = db.get(AppSetting, key)
-            if item is None:
-                db.add(AppSetting(key=key, value=encoded))
+        normalized_values[key] = normalized
+
+    # Payment mode changes and order creation must observe one serialized state.
+    # SQLite otherwise lets both requests read the old setting before either writes.
+    if db.bind is not None and db.bind.dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    try:
+        for key, normalized in normalized_values.items():
+            encoded = json.dumps(normalized, ensure_ascii=False, allow_nan=False)
+            if key == REGISTRATION_OPEN_KEY:
+                set_registration_open(db, normalized)
             else:
-                item.value = encoded
-    db.commit()
-    return {key: _validate_setting(key, value) for key, value in payload.values.items()}
+                item = db.get(AppSetting, key)
+                if item is None:
+                    db.add(AppSetting(key=key, value=encoded))
+                else:
+                    item.value = encoded
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return normalized_values
