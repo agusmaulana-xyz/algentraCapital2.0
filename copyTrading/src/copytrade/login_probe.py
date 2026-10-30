@@ -20,8 +20,10 @@ from urllib.request import Request, urlopen
 from .mt5_runtime import disable_terminal_mcp, stop_terminals_in
 
 PROBE_TIMEOUT_SECONDS = 150
-PROBE_SYMBOL_FALLBACK_SECONDS = 15
-PROBE_STARTUP_SYMBOLS = ("XAUUSDc", "XAUUSD")
+# The probe EA scans the broker catalog for XAUUSD variants after connecting.
+# Use a common chart only to bootstrap the EA; do not restart MT5 for each
+# broker-specific gold suffix (XAUUSDc, XAUUSDm, and similar names).
+PROBE_STARTUP_SYMBOL = "EURUSD"
 STATUS_FILE = "algentra-login-probe.json"
 STATUS_MARKER = "[MT5LoginProbe] STATUS "
 
@@ -269,110 +271,87 @@ def _probe(request: dict[str, Any]) -> tuple[bool, str]:
         last_status: dict[str, Any] | None = None
         last_auth_failure: str | None = None
         last_terminal_exited = False
-        for attempt, startup_symbol in enumerate(PROBE_STARTUP_SYMBOLS):
-            if time.monotonic() >= deadline:
-                break
-            status_path.unlink(missing_ok=True)
-            ini = "\r\n".join((
-                "[Common]",
-                f"Login={login}",
-                f"Password={password}",
-                f"Server={access_point}",
-                "KeepPrivate=1",
-                "NewsEnable=0",
-                "ProxyEnable=0",
-                "",
-                "[Experts]",
-                "AllowLiveTrading=1",
-                "AllowDllImport=0",
-                "Enabled=1",
-                "Account=0",
-                "Profile=0",
-                "",
-                "[StartUp]",
-                r"Expert=Algentra\MT5LoginProbe",
-                f"Symbol={startup_symbol}",
-                "Period=M1",
-                "",
-            ))
-            try:
-                ini_path.write_text(ini, encoding="utf-8", newline="")
-                os.chmod(ini_path, 0o600)
-            except OSError:
-                pass
-            stop_terminals_in(account_dir)
-            try:
-                process = subprocess.Popen(
-                    [str(terminal), "/portable", f"/config:{ini_path}"],
-                    cwd=account_dir,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=os.environ.copy(),
-                    **_prepare_hidden_startup(),
-                )
-            except OSError:
-                return False, "Terminal MT5 tidak dapat dijalankan oleh worker."
+        status_path.unlink(missing_ok=True)
+        ini = "\r\n".join((
+            "[Common]",
+            f"Login={login}",
+            f"Password={password}",
+            f"Server={access_point}",
+            "KeepPrivate=1",
+            "NewsEnable=0",
+            "ProxyEnable=0",
+            "",
+            "[Experts]",
+            "AllowLiveTrading=1",
+            "AllowDllImport=0",
+            "Enabled=1",
+            "Account=0",
+            "Profile=0",
+            "",
+            "[StartUp]",
+            r"Expert=Algentra\MT5LoginProbe",
+            f"Symbol={PROBE_STARTUP_SYMBOL}",
+            "Period=M1",
+            "",
+        ))
+        try:
+            ini_path.write_text(ini, encoding="utf-8", newline="")
+            os.chmod(ini_path, 0o600)
+        except OSError:
+            pass
+        stop_terminals_in(account_dir)
+        try:
+            process = subprocess.Popen(
+                [str(terminal), "/portable", f"/config:{ini_path}"],
+                cwd=account_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=os.environ.copy(),
+                **_prepare_hidden_startup(),
+            )
+        except OSError:
+            return False, "Terminal MT5 tidak dapat dijalankan oleh worker."
 
-            remove_timer = threading.Timer(20, lambda: ini_path.unlink(missing_ok=True))
-            remove_timer.daemon = True
-            remove_timer.start()
-            attempt_deadline = deadline
-            if attempt == 0:
-                attempt_deadline = min(deadline, time.monotonic() + PROBE_SYMBOL_FALLBACK_SECONDS)
-            saw_probe_status = False
-            last_terminal_exited = False
-            try:
-                while time.monotonic() < attempt_deadline:
-                    status, auth_failure = _read_status([status_path], log_offsets)
-                    if auth_failure:
-                        last_auth_failure = auth_failure
-                        break
-                    if status is not None:
-                        saw_probe_status = True
-                        last_status = status
-                        # Once the EA has started, wait for the full broker login
-                        # timeout instead of switching charts while it connects.
-                        attempt_deadline = deadline
-                        if status.get("ready"):
-                            if int(status.get("login", 0) or 0) != login:
-                                return False, "Terminal login ke akun lain dari yang didaftarkan."
-                            if str(status.get("server", "")).strip().casefold() != server.casefold():
-                                return False, "Server broker yang terhubung tidak cocok dengan pilihan akun."
-                            valid = status.get("valid")
-                            message = status.get("message")
-                            if isinstance(valid, bool) and isinstance(message, str):
-                                keep_terminal_process = bool(keep_terminal_requested and valid)
-                                return valid, message[:240]
-                            return False, "Terminal MT5 mengirim status login yang tidak valid."
-                    if process.poll() is not None:
-                        last_terminal_exited = True
-                        break
-                    time.sleep(0.5)
-            finally:
-                remove_timer.cancel()
-                if not keep_terminal_process and process.poll() is None:
+        remove_timer = threading.Timer(20, lambda: ini_path.unlink(missing_ok=True))
+        remove_timer.daemon = True
+        remove_timer.start()
+        try:
+            while time.monotonic() < deadline:
+                status, auth_failure = _read_status([status_path], log_offsets)
+                if auth_failure:
+                    last_auth_failure = auth_failure
+                    break
+                if status is not None:
+                    last_status = status
+                    if status.get("ready"):
+                        if int(status.get("login", 0) or 0) != login:
+                            return False, "Terminal login ke akun lain dari yang didaftarkan."
+                        if str(status.get("server", "")).strip().casefold() != server.casefold():
+                            return False, "Server broker yang terhubung tidak cocok dengan pilihan akun."
+                        valid = status.get("valid")
+                        message = status.get("message")
+                        if isinstance(valid, bool) and isinstance(message, str):
+                            keep_terminal_process = bool(keep_terminal_requested and valid)
+                            return valid, message[:240]
+                        return False, "Terminal MT5 mengirim status login yang tidak valid."
+                if process.poll() is not None:
+                    last_terminal_exited = True
+                    break
+                time.sleep(0.5)
+        finally:
+            remove_timer.cancel()
+            if not keep_terminal_process and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
                     try:
-                        process.terminate()
-                        process.wait(timeout=5)
-                    except (OSError, subprocess.TimeoutExpired):
-                        try:
-                            process.kill()
-                        except OSError:
-                            pass
-                if not keep_terminal_process:
-                    stop_terminals_in(account_dir)
-
-            if last_auth_failure:
-                return False, _auth_failure_message(last_auth_failure)
-            if attempt == 0 and not saw_probe_status and not last_terminal_exited:
-                # The broker may not provide the startup chart symbol. Retry on
-                # the standard gold symbol; the probe EA then resolves XAUUSDc
-                # from the connected account and broker catalog.
-                continue
-            if attempt == 0 and last_terminal_exited and not saw_probe_status:
-                continue
-            break
+                        process.kill()
+                    except OSError:
+                        pass
+            if not keep_terminal_process:
+                stop_terminals_in(account_dir)
 
         if last_auth_failure:
             return False, _auth_failure_message(last_auth_failure)
@@ -384,7 +363,7 @@ def _probe(request: dict[str, Any]) -> tuple[bool, str]:
                 return False, detail[:240]
             if detail:
                 return False, "Terminal melaporkan belum terhubung ke broker setelah 150 detik. Periksa server broker dan koneksi worker."
-        return False, "Terminal MT5 tidak mengirim laporan EA. Worker mencoba chart XAUUSDc lalu XAUUSD; periksa jurnal MT5 dan folder MQL5\\Files."
+        return False, "Terminal MT5 tidak mengirim laporan EA pada chart bootstrap. Periksa jurnal MT5 dan folder MQL5\\Files."
     finally:
         try:
             ini_path.unlink(missing_ok=True)

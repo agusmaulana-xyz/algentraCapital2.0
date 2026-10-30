@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.006"
+#property version   "1.007"
 #property description "Reports isolated MT5 terminal login and trade readiness to the managed worker."
 
 input string ProbeStatusFileName = "algentra-login-probe.json";
@@ -32,46 +32,13 @@ int GoldVariantRank(const string symbol)
    return suffix == "" ? 0 : 1;
   }
 
-bool SelectKnownCentGoldSymbol(string &resolved)
+bool IsCurrencyCode(const string suffix)
   {
-   resolved = "";
-   string requested = "XAUUSDc";
-   bool is_custom = false;
-   if(SymbolExist(requested, is_custom) &&
-      SymbolInfoInteger(requested, SYMBOL_TRADE_MODE) != SYMBOL_TRADE_MODE_DISABLED)
-     {
-      ResetLastError();
-      if(SymbolSelect(requested, true))
-        {
-         resolved = requested;
-         Print("[MT5LoginProbe] cent gold symbol added to Market Watch: ", resolved);
+   string currencies[] = {"AUD", "CAD", "CHF", "CNH", "CNY", "EUR", "GBP", "HKD", "JPY", "MXN",
+                          "NOK", "NZD", "PLN", "RUB", "SEK", "SGD", "TRY", "USD", "ZAR"};
+   for(int i = 0; i < ArraySize(currencies); i++)
+      if(suffix == currencies[i])
          return true;
-        }
-      Print("[MT5LoginProbe] failed to add ", requested,
-            " to Market Watch; error ", GetLastError());
-     }
-
-   // Symbol names are case-sensitive in MT5. Search the broker catalog for
-   // the same exact XAUUSDc symbol with different letter casing.
-   int total = SymbolsTotal(false);
-   for(int i = 0; i < total; i++)
-     {
-      string candidate = SymbolName(i, false);
-      string upper = candidate;
-      StringToUpper(upper);
-      if(upper != "XAUUSDC" ||
-         SymbolInfoInteger(candidate, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
-         continue;
-      ResetLastError();
-      if(SymbolSelect(candidate, true))
-        {
-         resolved = candidate;
-         Print("[MT5LoginProbe] cent gold symbol added to Market Watch: ", resolved);
-         return true;
-        }
-      Print("[MT5LoginProbe] failed to add ", candidate,
-            " to Market Watch; error ", GetLastError());
-     }
    return false;
   }
 
@@ -152,14 +119,6 @@ bool ResolveGoldSymbol(string &resolved)
   {
    resolved = "";
    bool cent_account = AccountUsesCentSymbols();
-   if(cent_account)
-     {
-      if(SelectKnownCentGoldSymbol(resolved))
-         return true;
-      Print("[MT5LoginProbe] akun cent membutuhkan simbol XAUUSDc, tetapi simbol itu tidak tersedia atau nonaktif.");
-      return false;
-     }
-
    string best = "";
    string best_upper = "";
    long best_quote_time = 0;
@@ -173,6 +132,9 @@ bool ResolveGoldSymbol(string &resolved)
       string upper = candidate;
       StringToUpper(upper);
       if(StringLen(candidate) < 6 || StringSubstr(upper, 0, 6) != "XAUUSD")
+         continue;
+      string suffix = StringSubstr(upper, 6);
+      if(StringLen(suffix) == 3 && IsCurrencyCode(suffix))
          continue;
       if(SymbolInfoInteger(candidate, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
          continue;
@@ -190,6 +152,12 @@ bool ResolveGoldSymbol(string &resolved)
          quote_time = 0;
       int suffix_length = StringLen(candidate) - 6;
       int variant_rank = GoldVariantRank(candidate);
+      // Cent accounts often use a broker suffix for their account-specific
+      // gold contract. Prefer that variant when quote and history data tie.
+      if(cent_account && variant_rank == 0)
+         variant_rank = 1;
+      else if(cent_account)
+         variant_rank = 0;
       // A symbol can exist in the broker catalog (e.g. bare XAUUSD) without the
       // account receiving any data for it, which gives a black chart. Symbols
       // that actually have bars always outrank those that do not.
@@ -284,6 +252,6 @@ void OnTimer()
       message = "Login broker tersambung, tetapi izin Auto Trading terminal belum aktif.";
    WriteStatus(true, true, message);
    // Connection validation does not wait for symbol resolution. Resolve and select
-   // the account's XAUUSD or cent XAUUSDc after the live session is reported.
+   // the broker's available XAUUSD variant after the live session is reported.
    EnsureDefaultGoldChart();
   }

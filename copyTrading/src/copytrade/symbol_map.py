@@ -22,7 +22,7 @@ def map_symbol(master_symbol: str, config: Mapping[str, Any]) -> str:
         follower_symbol = str(mappings["XAUUSD"])
         # Preserve a numeric broker suffix such as XAUUSD247 on regular
         # accounts, where that exact symbol may have its own trading session.
-        # Cent accounts are normalized to XAUUSDc by resolve_symbol().
+        # resolve_symbol() searches the broker's available XAUUSD variants.
         if suffix.isdigit() and follower_symbol.strip().upper() == "XAUUSD":
             return str(master_symbol)
         return follower_symbol
@@ -56,12 +56,12 @@ def is_cent_gold_symbol(symbol: str, account: Any = None) -> bool:
 
 def _symbol_root(requested: str) -> str:
     upper = requested.strip().upper()
-    # Managed copy currently maps XAUUSD from the source. Accept a client-set
-    # cent suffix too, then search all variants of the same instrument.
-    for suffix in ("MICRO", "MINI", "RAW", "PRO", "ECN", "C", "M"):
-        if upper.startswith("XAUUSD") and upper.endswith(suffix) and len(upper) > 6:
-            return "XAUUSD"
-    if upper.startswith("XAUUSD") and upper[6:].isdigit():
+    # Broker gold names can have arbitrary suffixes (XAUUSDm, XAUUSD.c,
+    # XAUUSD-pro, and so on). Keep actual currency crosses as exact requests.
+    if upper.startswith("XAUUSD"):
+        suffix = upper[6:]
+        if suffix and len(suffix) == 3 and suffix in _CURRENCY_SUFFIXES:
+            return upper
         return "XAUUSD"
     return upper
 
@@ -115,22 +115,17 @@ def _candidate_symbols(mt5: Any, requested: str, root: str) -> list[Any]:
 def resolve_symbol(mt5: Any, requested: str, account: Any = None) -> str:
     """Resolve an exact symbol or the best broker variant for this account.
 
-    Cent accounts use XAUUSDc exclusively when the configured name is the
-    canonical XAUUSD. Standard accounts prefer the exact symbol. In both cases
-    an unavailable or disabled instrument is skipped, and live quotes break
-    ties between broker suffix variants.
+    Any broker symbol beginning with XAUUSD can be selected, including custom
+    suffixes used by cent and standard accounts. An explicit available symbol
+    is preferred; otherwise live quotes and the broker's available variants
+    determine the result.
     """
     requested = str(requested).strip()
     if not requested:
         raise ValueError("Nama simbol follower kosong")
     cent_account = account_uses_cent_symbols(account)
-    if cent_account and requested.upper().startswith("XAUUSD"):
-        # Normalize stored or client-entered gold aliases to the one supported
-        # cent symbol instead of searching another XAUUSD suffix.
-        requested = "XAUUSD"
     root = _symbol_root(requested)
     candidates = _candidate_symbols(mt5, requested, root)
-    cent_symbol_only = root == "XAUUSD" and (cent_account or requested.upper() == "XAUUSDC")
     explicit_variant = requested.upper() != root.upper()
     ranked: list[tuple[tuple[Any, ...], str]] = []
     disabled = getattr(mt5, "SYMBOL_TRADE_MODE_DISABLED", 0)
@@ -138,8 +133,6 @@ def resolve_symbol(mt5: Any, requested: str, account: Any = None) -> str:
     for candidate in candidates:
         name = str(_value(candidate, "name", requested) or requested).strip()
         if not _looks_like_requested_instrument(name, requested, root, candidate):
-            continue
-        if cent_symbol_only and name.upper() != "XAUUSDC":
             continue
         info = mt5.symbol_info(name) or candidate
         trade_mode = _value(info, "trade_mode")
@@ -159,20 +152,17 @@ def resolve_symbol(mt5: Any, requested: str, account: Any = None) -> str:
         suffix = name.upper()[len(root):] if name.upper().startswith(root) else ""
         direct_match_rank = 0 if name.upper().startswith(root) else 1
         requested_rank = 0 if explicit_variant and name.casefold() == requested.casefold() else 1
-        if cent_symbol_only:
-            variant_rank = 0
-            score = (requested_rank, variant_rank, direct_match_rank, -int(has_quote), -tick_time, len(suffix), name.casefold())
-        else:
-            variant_rank = 0 if not suffix else 1
-            score = (requested_rank, -int(has_quote), variant_rank, direct_match_rank, -tick_time, len(suffix), name.casefold())
+        # For cent accounts, prefer a broker-suffixed instrument when no
+        # explicit variant was configured, while still using any available
+        # XAUUSD variant if the broker has no suffix at all.
+        variant_rank = (0 if suffix else 1) if cent_account else (0 if not suffix else 1)
+        score = (requested_rank, -int(has_quote), -tick_time, variant_rank, direct_match_rank, len(suffix), name.casefold())
         ranked.append((score, name))
 
     if not ranked:
-        if cent_symbol_only:
-            raise ValueError("Simbol XAUUSDc tidak ditemukan atau nonaktif. Akun cent ini hanya memakai XAUUSDc.")
         if root == "XAUUSD":
             raise ValueError(
-                f"Simbol '{requested}' tidak ditemukan atau nonaktif. Worker mencari otomatis XAUUSD dan XAUUSDc pada broker."
+                f"Simbol '{requested}' tidak ditemukan atau nonaktif. Worker mencari otomatis semua varian simbol XAUUSD pada broker."
             )
         raise ValueError(f"Simbol '{requested}' tidak ditemukan atau nonaktif di terminal follower")
     ranked.sort(key=lambda item: item[0])

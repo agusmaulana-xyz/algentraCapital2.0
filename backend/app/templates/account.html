@@ -500,7 +500,7 @@ function addManagedAccountCard(card, account, plan) {
     fields.broker_password.required = true;
     fields.broker_password.placeholder = "Password trading akun follower";
   }
-  addInput("follower_symbol", "Simbol emas di broker (akun cent memakai XAUUSDc otomatis)", "text", profile.follower_symbol || "XAUUSD");
+  addInput("follower_symbol", "Simbol emas di broker", "text", profile.follower_symbol || "XAUUSD");
   fields.follower_symbol.maxLength = 64;
   fields.follower_symbol.pattern = "[A-Za-z0-9._-]+";
   const modeLabel = document.createElement("label"); modeLabel.textContent = "Metode ukuran lot";
