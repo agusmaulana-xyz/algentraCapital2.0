@@ -31,6 +31,28 @@
       </div>
       <p id="payment-message" class="status" role="status"></p>
     </section>
+    <section id="ea-license-keys" aria-labelledby="ea-license-heading">
+      <span class="eyebrow">EA access</span>
+      <h2 id="ea-license-heading">API key EA TERNAK UANG</h2>
+      <p class="section-help">Buat key untuk parameter <code>AlgentraApikey</code>. Jam kedaluwarsa menggunakan WIB. Tentukan tanggal; jam dan menit opsional. Jika waktu dikosongkan, key berlaku sampai akhir tanggal tersebut (23.59 WIB). Key hanya ditampilkan sekali saat dibuat.</p>
+      <form id="ea-key-form" class="toolbar">
+        <label for="ea-key-label">Label key</label>
+        <input id="ea-key-label" maxlength="80" required placeholder="Contoh: Akun Agus - akun live">
+        <label for="ea-key-expires-on">Tanggal kedaluwarsa</label>
+        <input id="ea-key-expires-on" type="date" required>
+        <label for="ea-key-expires-time">Jam kedaluwarsa (WIB, opsional)</label>
+        <input id="ea-key-expires-time" type="text" inputmode="numeric" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxlength="5" placeholder="12:00" title="Gunakan format 24 jam HH:MM WIB, contoh 12:00" autocomplete="off">
+        <small class="field-help">Format 24 jam HH:MM. Contoh: 12:00 WIB</small>
+        <button id="ea-key-create" type="submit">Buat API key</button>
+      </form>
+      <p id="ea-key-message" class="status" role="status"></p>
+      <div id="ea-key-once" class="card" hidden>
+        <b>Salin key sekarang. Key ini tidak akan ditampilkan lagi.</b>
+        <textarea id="ea-key-value" readonly rows="2" aria-label="API key baru"></textarea>
+        <button id="ea-key-copy" type="button" class="secondary">Salin API key</button>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Label</th><th>Fingerprint</th><th>Dibuat</th><th>Kedaluwarsa</th><th>Validasi terakhir</th><th>Aksi</th></tr></thead><tbody id="ea-keys-table"></tbody></table></div>
+    </section>
     <div class="cards">
       <div class="card"><span>Total signal</span><b id="signals-total">&mdash;</b><small>Semua sinyal yang tercatat.</small></div>
       <div class="card"><span>Tereksekusi</span><b id="signals-executed">&mdash;</b><small>Order yang diterima terminal MT5.</small></div>
@@ -178,6 +200,40 @@ const $ = (selector) => document.querySelector(selector);
       if (scalperChart) { scalperChart.data=data; scalperChart.update(); }
       else scalperChart = new Chart($("#scalper-chart"), {type:"bar",data,options:{responsive:true,scales:{y:{beginAtZero:true,precision:0}}}});
     }
+    async function loadEALicenseKeys() {
+      const keys = await api("/api/admin/ea-keys");
+      const body = $("#ea-keys-table");
+      body.replaceChildren();
+      for (const key of keys) {
+        const tr = document.createElement("tr");
+        const expiry = key.expires_at
+          ? `${displayTime(key.expires_at)}${key.expired ? " · KEDALUWARSA" : ""}`
+          : "Tidak dibatasi (key lama)";
+        for (const value of [key.label, key.fingerprint, displayTime(key.created_at), expiry, displayTime(key.last_validated_at)]) {
+          const td = document.createElement("td");
+          td.textContent = value;
+          tr.append(td);
+        }
+        const actionCell = document.createElement("td");
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "secondary";
+        remove.textContent = "Hapus";
+        remove.addEventListener("click", async () => {
+          if (!window.confirm(`Hapus API key “${key.label}”? EA akan berhenti saat validasi berikutnya.`)) return;
+          try {
+            await api(`/api/admin/ea-keys/${key.id}`, {method:"DELETE"});
+            $("#ea-key-message").textContent = `API key “${key.label}” dihapus.`;
+            await loadEALicenseKeys();
+          } catch (error) {
+            $("#ea-key-message").textContent = `Gagal menghapus API key: ${error.message}`;
+          }
+        });
+        actionCell.append(remove);
+        tr.append(actionCell);
+        body.append(tr);
+      }
+    }
     async function loadLogs() {
       const values = {level:$("#log-level").value,search:$("#log-search").value};
       const logs = await api(queryWithFilters("/api/logs", {...values,limit:5}));
@@ -266,7 +322,7 @@ const $ = (selector) => document.querySelector(selector);
       catch(_) {}
     },10000);
     async function refresh() {
-      try { await Promise.all([loadStatsAndSignals(),loadGroups(),loadScalperStats(),loadLogs(),loadTrades()]); }
+      try { await Promise.all([loadStatsAndSignals(),loadGroups(),loadScalperStats(),loadEALicenseKeys(),loadLogs(),loadTrades()]); }
       catch(error) { $("#connection").textContent=`Gagal memuat: ${error.message}`; }
     }
     $("#filter-logs").addEventListener("click",loadLogs);
@@ -275,6 +331,42 @@ const $ = (selector) => document.querySelector(selector);
     $("#registration-close").addEventListener("click",()=>setRegistrationOpen(false));
     $("#payment-on").addEventListener("click",()=>setPaymentsEnabled(true));
     $("#payment-off").addEventListener("click",()=>setPaymentsEnabled(false));
+    $("#ea-key-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const label = $("#ea-key-label").value.trim();
+      const expiresOn = $("#ea-key-expires-on").value;
+      const expiresTime = $("#ea-key-expires-time").value;
+      const message = $("#ea-key-message");
+      const createButton = $("#ea-key-create");
+      if (!label) { message.textContent = "Isi label key terlebih dahulu."; return; }
+      if (!expiresOn) { message.textContent = "Pilih tanggal kedaluwarsa."; return; }
+      createButton.disabled = true;
+      message.textContent = "Membuat API key...";
+      try {
+        const result = await api("/api/admin/ea-keys", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({label,expires_on:expiresOn,expires_time:expiresTime || null}),
+        });
+        $("#ea-key-value").value = result.key;
+        $("#ea-key-once").hidden = false;
+        $("#ea-key-label").value = "";
+        message.textContent = `API key berhasil dibuat dan berlaku sampai ${displayTime(result.expires_at)} WIB. Salin key sekarang dan tempel ke parameter AlgentraApikey di MT5.`;
+        await loadEALicenseKeys();
+      } catch (error) {
+        message.textContent = `Gagal membuat API key: ${error.message}`;
+      } finally {
+        createButton.disabled = false;
+      }
+    });
+    $("#ea-key-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText($("#ea-key-value").value);
+        $("#ea-key-message").textContent = "API key disalin. Simpan di parameter AlgentraApikey pada MT5.";
+      } catch (error) {
+        $("#ea-key-message").textContent = "Gagal mengakses clipboard. Pilih dan salin key secara manual.";
+      }
+    });
     $("#settings-form").addEventListener("submit",async(event)=>{
       event.preventDefault(); const message=$("#settings-message");
       try {

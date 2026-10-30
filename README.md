@@ -13,6 +13,10 @@ Layanan copy trading berbasis AI dengan FastAPI, SQLite, parser Gemini, koneksi 
 7. Untuk Telegram, isi `TELEGRAM_API_ID` dan `TELEGRAM_API_HASH` dari [my.telegram.org](https://my.telegram.org), lalu restart backend dan buka `/telegram-setup` setelah login admin.
 8. Isi `AIRPAY_BASE_URL` dan `AIRPAY_API_KEY` di `.env`; `AIRPAY_MERCHANT_UID` menjadi cadangan jika respons QR dari AirPay tidak menyertakan `mid`. API key hanya digunakan oleh backend. Pembayaran baru dibuat dan dikonfirmasi langsung melalui AirPay; bot Telegram pembayaran tetap tersedia untuk menangani pesanan manual lama yang masih menunggu pemeriksaan.
 
+### Lisensi EA TERNAK UANG
+
+Setelah backend terbaru berjalan pada domain HTTPS, login sebagai admin dan buka bagian **API key EA TERNAK UANG** di dashboard. Tanggal kedaluwarsa wajib diisi. Jam dan menit boleh dikosongkan; jika kosong, key berlaku sampai akhir tanggal tersebut (23:59 WIB). Jika diisi, key kedaluwarsa pada jam dan menit yang dipilih (WIB). Buat key, salin saat ditampilkan, lalu isi parameter `AlgentraApikey` pada EA. Biarkan `AlgentraServerURL` berisi `https://algentracapital.my.id`, dan tambahkan domain tersebut di **Tools > Options > Expert Advisors > Allow WebRequest** pada MT5. EA menolak berjalan jika key kosong, tidak valid, kedaluwarsa, dihapus, atau server lisensi tidak dapat dijangkau; key yang dihapus menghentikan EA pada pemeriksaan berikutnya, paling lambat sekitar satu menit. Key hanya disimpan sebagai hash di database dan tidak dapat ditampilkan ulang; buat key baru jika salinannya hilang.
+
 Kontak publik pada beranda diatur melalui variabel `CONTACT_*` di `.env.example` dan `.env`. Tautan email, Instagram, TikTok, grup/admin Telegram, dan website ditampilkan dengan ikon; alamat sosial harus berupa URL HTTPS.
 
 ## Akses publik melalui Cloudflare Tunnel

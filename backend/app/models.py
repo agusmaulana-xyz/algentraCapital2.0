@@ -247,6 +247,23 @@ class MT5Account(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
+class EALicenseKey(Base):
+    """Admin-issued license keys for the standalone EA TERNAK UANG product."""
+
+    __tablename__ = "ea_license_keys"
+    __table_args__ = (
+        Index("ux_ea_license_keys_key_hash", "key_hash", unique=True),
+        Index("ix_ea_license_keys_last_validated", "last_validated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(80), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ManagedCopyProfile(Base):
     """Encrypted broker access and bounded copy settings for server-managed followers."""
 

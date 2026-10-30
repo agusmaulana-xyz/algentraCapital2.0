@@ -199,6 +199,11 @@ def migrate_schema() -> None:
             with engine.begin() as connection:
                 for name, sql_type in missing.items():
                     connection.execute(text(f"ALTER TABLE pending_mt5_verifications ADD COLUMN {name} {sql_type}"))
+    if "ea_license_keys" in inspector.get_table_names():
+        columns = {column["name"] for column in inspector.get_columns("ea_license_keys")}
+        if "expires_at" not in columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE ea_license_keys ADD COLUMN expires_at DATETIME"))
 
 
 def get_db() -> Generator[Session, None, None]:

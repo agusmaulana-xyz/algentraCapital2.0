@@ -1,23 +1,91 @@
 import csv
+import hashlib
 import io
-from datetime import datetime
+import secrets
+from datetime import date, datetime, time, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..database import get_db
-from ..models import ScalperTrade, Signal, SystemLog, Trade
+from ..models import EALicenseKey, ScalperTrade, Signal, SystemLog, Trade, utc_now
 from ..routers.tg import telegram_manager
 from ..risk_controls import risk_state
 from ..schemas import LogResponse, SignalResponse
 from ..stats_service import get_dashboard_stats, get_group_stats, get_scalper_stats
-from ..time_utils import wib_datetime_to_utc_naive, wib_iso
+from ..time_utils import WIB, as_utc, wib_datetime_to_utc_naive, wib_iso
 
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
+
+
+class EALicenseKeyCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    expires_on: date
+    expires_time: time | None = None
+
+
+@router.get("/admin/ea-keys")
+def list_ea_license_keys(db: Session = Depends(get_db)) -> list[dict[str, object]]:
+    now = utc_now()
+    keys = db.execute(
+        select(EALicenseKey).order_by(EALicenseKey.created_at.desc(), EALicenseKey.id.desc())
+    ).scalars()
+    return [
+        {
+            "id": key.id,
+            "label": key.label,
+            "fingerprint": key.key_hash[-8:].upper(),
+            "created_at": wib_iso(key.created_at),
+            "expires_at": wib_iso(key.expires_at),
+            "expired": key.expires_at is not None and as_utc(key.expires_at) <= now,
+            "last_validated_at": wib_iso(key.last_validated_at),
+        }
+        for key in keys
+    ]
+
+
+@router.post("/admin/ea-keys", status_code=201)
+def create_ea_license_key(payload: EALicenseKeyCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    label = payload.label.strip()
+    if not label:
+        raise HTTPException(status_code=422, detail="Nama key wajib diisi")
+
+    # Semua masa berlaku ditafsirkan dalam waktu Indonesia Barat.
+    # Date-only expiry remains active for the full selected WIB date.
+    expiration_time = payload.expires_time if payload.expires_time is not None else time.max
+    expires_at = datetime.combine(payload.expires_on, expiration_time, tzinfo=WIB).astimezone(timezone.utc)
+    if expires_at <= utc_now():
+        raise HTTPException(status_code=422, detail="Masa berlaku API key harus berada di waktu mendatang")
+
+    raw_key = "ALG-" + secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    key = EALicenseKey(label=label, key_hash=key_hash, created_at=utc_now(), expires_at=expires_at)
+    db.add(key)
+    db.commit()
+    db.refresh(key)
+    return {
+        "id": key.id,
+        "label": key.label,
+        "key": raw_key,
+        "fingerprint": key_hash[-8:].upper(),
+        "created_at": wib_iso(key.created_at),
+        "expires_at": wib_iso(key.expires_at),
+    }
+
+
+@router.delete("/admin/ea-keys/{key_id}")
+def delete_ea_license_key(key_id: int, db: Session = Depends(get_db)) -> dict[str, str]:
+    key = db.get(EALicenseKey, key_id)
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key tidak ditemukan")
+    db.delete(key)
+    db.commit()
+    return {"status": "deleted"}
 
 
 @router.get("/stats")

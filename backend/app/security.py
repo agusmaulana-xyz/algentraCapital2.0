@@ -220,6 +220,8 @@ class RateLimitMiddleware:
             return 10, 60
         if path in {"/api/ea/master/snapshot", "/api/mt5/follower/positions", "/api/mt5/follower/report"}:
             return 720, 60
+        if path == "/api/ea/license/validate":
+            return 30, 60
         if path == "/api/mt5/prepayment-checks":
             return 4, 60
         if path == "/api/mt5/servers":

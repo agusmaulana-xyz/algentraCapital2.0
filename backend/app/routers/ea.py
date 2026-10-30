@@ -15,6 +15,7 @@ from ..database import get_db
 from ..gemini_parser import SignalClassification
 from ..models import (
     AppSetting,
+    EALicenseKey,
     EAExecution,
     EAStatus,
     MT5MasterEquityCandle,
@@ -35,7 +36,7 @@ from ..public_realtime import public_performance_hub
 from .public import public_performance_payload
 from ..schemas import CopySnapshotInput
 from ..risk_controls import risk_state
-from ..time_utils import wib_iso
+from ..time_utils import as_utc, wib_iso
 
 
 router = APIRouter(prefix="/api/ea", tags=["ea"])
@@ -68,6 +69,53 @@ class ScalperHeartbeatReport(BaseModel):
     version: str = Field(min_length=1, max_length=64)
     symbol: str = Field(min_length=1, max_length=64)
     magic: int = Field(ge=0, le=9223372036854775807)
+
+
+@router.post("/license/validate")
+def validate_ternak_uang_license(
+    x_algentra_api_key: str | None = Header(default=None, alias="X-Algentra-API-Key"),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    raw_key = (x_algentra_api_key or "").strip()
+    if len(raw_key) < 32 or len(raw_key) > 256:
+        db.add(SystemLog(
+            level="WARN",
+            source="EA_LICENSE",
+            message="Validasi API key EA TERNAK UANG ditolak",
+        ))
+        db.commit()
+        raise HTTPException(status_code=401, detail="API key tidak valid atau sudah dicabut")
+
+    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    key = db.execute(select(EALicenseKey).where(EALicenseKey.key_hash == key_hash)).scalar_one_or_none()
+    if key is None:
+        db.add(SystemLog(
+            level="WARN",
+            source="EA_LICENSE",
+            message="Validasi API key EA TERNAK UANG ditolak",
+        ))
+        db.commit()
+        raise HTTPException(status_code=401, detail="API key tidak valid atau sudah dicabut")
+
+    now = utc_now()
+    if key.expires_at is not None and as_utc(key.expires_at) <= now:
+        db.add(SystemLog(
+            level="WARN",
+            source="EA_LICENSE",
+            message="Validasi API key EA TERNAK UANG ditolak karena kedaluwarsa",
+        ))
+        db.commit()
+        raise HTTPException(status_code=403, detail="API key sudah kedaluwarsa")
+
+    key.last_validated_at = now
+    db.commit()
+    return {
+        "valid": True,
+        "product": "EA TERNAK UANG",
+        "message": "API key aktif",
+        "checked_at": wib_iso(now),
+        "expires_epoch": math.ceil(as_utc(key.expires_at).timestamp()) if key.expires_at is not None else None,
+    }
 
 
 def require_ea_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
