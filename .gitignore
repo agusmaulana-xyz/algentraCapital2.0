@@ -13,3 +13,6 @@ backend/*.session
 backend/*.session-journal
 *.log
 task.md
+build/
+dist/
+*.egg-info/

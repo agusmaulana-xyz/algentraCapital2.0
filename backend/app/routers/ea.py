@@ -52,7 +52,7 @@ class ScalperTradeReport(BaseModel):
     terminal_login: str = Field(min_length=1, max_length=32, pattern=r"^\d+$")
     terminal_server: str = Field(min_length=1, max_length=128)
     magic: int = Field(ge=0, le=9223372036854775807)
-    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    symbol: str = Field(min_length=1, max_length=64, pattern=r"^[^\s\x00-\x1f\x7f]+$")
     action: Literal["BUY", "SELL"]
     lots: float = Field(gt=0, le=1000, allow_inf_nan=False)
     price: float = Field(gt=0, allow_inf_nan=False)
