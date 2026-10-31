@@ -5,6 +5,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 backend/data/
+# SQLite sidecars are transient runtime state and must not block deployments.
+backend/backend/data/*.db-shm
+backend/backend/data/*.db-wal
+backend/backend/data/*.db-journal
 backend/*.session
 backend/*.session-journal
 *.log
