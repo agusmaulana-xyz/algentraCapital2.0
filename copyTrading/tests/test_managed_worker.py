@@ -130,6 +130,39 @@ def test_validate_login_returns_probe_success(tmp_path, monkeypatch):
     assert "AllowLiveTrading=1" in ini
 
 
+def test_validate_login_logs_success_when_gold_symbol_is_only_a_warning(tmp_path, monkeypatch, caplog):
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "terminal64.exe").write_bytes(b"test-terminal")
+    worker = ManagedWorker.__new__(ManagedWorker)
+    worker.terminals_dir = tmp_path / "runtime" / "terminals"
+    worker.template_dir = template
+    worker.parent_environment = {}
+    worker.config = {"worker_api_key_env": "COPIER_WORKER_API_KEY"}
+    warning = "Login broker berhasil. Peringatan: simbol emas belum tersedia; login tetap berhasil dan resolver akan mencoba lagi."
+    monkeypatch.setattr(
+        "copytrade.managed_worker.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"valid": True, "message": warning}),
+            stderr="",
+        ),
+    )
+
+    valid, message = worker._validate_login({
+        "account_id": 8,
+        "login": "12345",
+        "server": "Broker-Demo",
+        "broker_password": "private-password",
+    })
+
+    assert valid is True
+    assert message == warning
+    assert "kesiapan simbol/chart sebagai peringatan" in caplog.text
+    assert "broker=Broker-Demo" in caplog.text
+    assert "private-password" not in caplog.text
+
+
 def test_validate_login_repairs_existing_partial_terminal_folder(tmp_path, monkeypatch):
     template = tmp_path / "template"
     template.mkdir()

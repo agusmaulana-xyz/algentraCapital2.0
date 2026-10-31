@@ -1,11 +1,14 @@
 import json
 import shutil
 
+from copytrade import login_probe
 from copytrade.login_probe import (
     _auth_failure_message,
+    _authorized_without_probe_message,
     _probe,
     _read_status,
     _seed_broker_servers,
+    _terminal_log_offsets,
     _valid_access_point,
 )
 from copytrade import mt5_runtime
@@ -43,9 +46,10 @@ def test_probe_reads_status_json_from_portable_terminal_files(tmp_path):
         "server": "Broker-Demo",
     }), encoding="utf-8")
 
-    status, failure = _read_status([status_path], {})
+    status, failure, authorized = _read_status([status_path], {})
 
     assert failure is None
+    assert authorized is False
     assert status == {
         "ready": True,
         "valid": True,
@@ -53,6 +57,141 @@ def test_probe_reads_status_json_from_portable_terminal_files(tmp_path):
         "login": 12345,
         "server": "Broker-Demo",
     }
+
+
+def test_terminal_authorization_log_confirms_the_exact_login_without_an_expert_report(tmp_path):
+    terminal_dir = tmp_path
+    log_dir = terminal_dir / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "20261101.log"
+    log_path.write_bytes("Network '987654': authorized on Broker-Demo\r\n".encode("utf-16-le"))
+
+    status, failure, authorized = _read_status(
+        [terminal_dir / "MQL5" / "Files" / "status.json"],
+        {log_path: 0},
+        expected_login=987654,
+    )
+
+    assert status is None
+    assert failure is None
+    assert authorized is True
+    message = _authorized_without_probe_message("Broker-Demo", status, failure)
+    assert "Login broker berhasil" in message
+    assert "chart tidak tersedia" in message
+    assert "login tetap berhasil" in message
+
+
+def test_terminal_authorization_log_does_not_accept_a_different_login(tmp_path):
+    terminal_dir = tmp_path
+    log_dir = terminal_dir / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "20261101.log"
+    log_path.write_bytes("Network '987654': authorized on Broker-Demo\r\n".encode("utf-16-le"))
+
+    _, failure, authorized = _read_status(
+        [terminal_dir / "MQL5" / "Files" / "status.json"],
+        {log_path: 0},
+        expected_login=987655,
+    )
+
+    assert failure is None
+    assert authorized is False
+
+
+def test_probe_ignores_old_authorization_lines_from_previous_attempts(tmp_path):
+    terminal_dir = tmp_path
+    log_dir = terminal_dir / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "20261101.log"
+    log_path.write_bytes("Network '987654': authorized on Broker-Demo\r\n".encode("utf-16-le"))
+    offsets = _terminal_log_offsets(terminal_dir)
+
+    _, failure, authorized = _read_status(
+        [terminal_dir / "MQL5" / "Files" / "status.json"],
+        offsets,
+        expected_login=987654,
+    )
+
+    assert failure is None
+    assert authorized is False
+
+
+def test_terminal_authorization_failure_is_scoped_to_the_requested_login(tmp_path):
+    terminal_dir = tmp_path
+    log_dir = terminal_dir / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "20261101.log"
+    log_path.write_bytes(
+        "Network '987654': authorization on Broker-Demo '987654' failed (Invalid account)\r\n".encode("utf-16-le")
+    )
+
+    _, failure, authorized = _read_status(
+        [terminal_dir / "MQL5" / "Files" / "status.json"],
+        {log_path: 0},
+        expected_login=987654,
+    )
+
+    assert failure == "invalid account"
+    assert authorized is False
+
+
+def test_probe_status_file_does_not_hide_a_successful_terminal_authorization(tmp_path):
+    terminal_dir = tmp_path
+    status_path = terminal_dir / "MQL5" / "Files" / "status.json"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(json.dumps({"ready": False, "valid": False, "message": "Menunggu broker."}), encoding="utf-8")
+    log_dir = terminal_dir / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "20261101.log"
+    log_path.write_bytes("Network '987654': authorized on Broker-Demo\r\n".encode("utf-16-le"))
+
+    status, failure, authorized = _read_status(
+        [status_path],
+        {log_path: 0},
+        expected_login=987654,
+    )
+
+    assert status == {"ready": False, "valid": False, "message": "Menunggu broker."}
+    assert failure is None
+    assert authorized is True
+
+
+def test_probe_accepts_broker_authorization_when_gold_chart_report_is_missing(tmp_path, monkeypatch):
+    terminal_dir = tmp_path / "account-terminal"
+    terminal_dir.mkdir()
+    terminal = terminal_dir / "terminal64.exe"
+    terminal.write_bytes(b"test terminal")
+    log_dir = terminal_dir / "logs"
+
+    class AuthorizedTerminal:
+        def poll(self):
+            return None
+
+    def launch_terminal(*_args, **_kwargs):
+        log_dir.mkdir(exist_ok=True)
+        (log_dir / "20261101.log").write_bytes(
+            "Network '987654': authorized on Broker-Demo\r\n".encode("utf-16-le")
+        )
+        return AuthorizedTerminal()
+
+    monkeypatch.setattr(login_probe, "_broker_access_point", lambda _server: None)
+    monkeypatch.setattr(login_probe, "_seed_broker_servers", lambda *_args: None)
+    monkeypatch.setattr(login_probe, "disable_terminal_mcp", lambda _directory: None)
+    monkeypatch.setattr(login_probe, "stop_terminals_in", lambda _directory: None)
+    monkeypatch.setattr(login_probe.subprocess, "Popen", launch_terminal)
+
+    valid, message = _probe({
+        "path": str(terminal),
+        "login": 987654,
+        "password": "temporary-secret",
+        "server": "Broker-Demo",
+        "keep_terminal": True,
+    })
+
+    assert valid is True
+    assert "Login broker berhasil" in message
+    assert "chart tidak tersedia" in message
+    assert "temporary-secret" not in message
 
 
 def test_native_probe_explains_common_broker_rejections():

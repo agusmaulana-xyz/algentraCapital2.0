@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,6 +27,7 @@ PROBE_TIMEOUT_SECONDS = 150
 PROBE_STARTUP_SYMBOL = "EURUSD"
 STATUS_FILE = "algentra-login-probe.json"
 STATUS_MARKER = "[MT5LoginProbe] STATUS "
+logger = logging.getLogger(__name__)
 
 
 def _result(valid: bool, message: str) -> None:
@@ -133,12 +135,35 @@ def _seed_broker_servers(
             continue
 
 
-def _read_status(paths: list[Path], log_offsets: dict[Path, int]) -> tuple[dict[str, Any] | None, str | None]:
+def _terminal_log_offsets(terminal_dir: Path) -> dict[Path, int]:
+    """Ignore old MT5 log entries and inspect only output from this probe run."""
+    offsets: dict[Path, int] = {}
+    for pattern in ("logs/*.log", "MQL5/Logs/*.log"):
+        try:
+            paths = terminal_dir.glob(pattern)
+            for path in paths:
+                try:
+                    offsets[path] = path.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return offsets
+
+
+def _read_status(
+    paths: list[Path],
+    log_offsets: dict[Path, int],
+    *,
+    expected_login: int | None = None,
+) -> tuple[dict[str, Any] | None, str | None, bool]:
+    status_result: dict[str, Any] | None = None
     for path in paths:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and isinstance(data.get("ready"), bool):
-                return data, None
+                status_result = data
+                break
         except (OSError, UnicodeError, json.JSONDecodeError):
             pass  # MT5 can be midway through replacing the status file.
 
@@ -148,6 +173,8 @@ def _read_status(paths: list[Path], log_offsets: dict[Path, int]) -> tuple[dict[
                 log_offsets[log_path] = 0
 
     failure: str | None = None
+    authorized = False
+    login_marker = (f"'{expected_login}'", f'"{expected_login}"') if expected_login is not None else ()
     for log_path, offset in list(log_offsets.items()):
         try:
             raw = log_path.read_bytes()
@@ -164,15 +191,44 @@ def _read_status(paths: list[Path], log_offsets: dict[Path, int]) -> tuple[dict[
                 try:
                     data = json.loads(line[marker_at + len(STATUS_MARKER) :].strip())
                     if isinstance(data, dict) and isinstance(data.get("ready"), bool):
-                        return data, None
+                        status_result = data
                 except json.JSONDecodeError:
                     pass
             lower = line.casefold()
-            if "authorization on" in lower and "failed (" in lower:
+            matches_expected_login = expected_login is None or any(marker in line for marker in login_marker)
+            if not matches_expected_login:
+                continue
+            if "authorized on" in lower:
+                authorized = True
+                failure = None
+            elif "authorization on" in lower and "failed (" in lower:
+                authorized = False
                 failure = lower.rsplit("failed (", 1)[-1].rstrip(") .\t\r\n")
             if "trading has been disabled" in lower and "disabled on server" in lower:
+                authorized = True
                 failure = "trading disabled on server"
-    return None, failure
+    return status_result, failure, authorized
+
+
+def _authorized_without_probe_message(
+    server: str,
+    status: dict[str, Any] | None,
+    auth_warning: str | None,
+) -> str:
+    if auth_warning == "trading disabled on server":
+        message = _auth_failure_message(auth_warning)
+    else:
+        message = (
+            f"Login broker berhasil pada server {server}; status dikonfirmasi dari jurnal otorisasi MT5. "
+            "Laporan Expert/chart tidak tersedia, jadi pemeriksaan simbol emas ditandai sebagai peringatan."
+        )
+    symbol = str((status or {}).get("gold_symbol", "") or "").strip()
+    symbol_status = str((status or {}).get("gold_symbol_status", "") or "").strip().upper()
+    if symbol_status == "AVAILABLE" and symbol:
+        message += f" Simbol emas terdeteksi: {symbol}."
+    else:
+        message += " Simbol emas belum dilaporkan; login tetap berhasil dan resolver akan mencoba lagi."
+    return message[:240]
 
 
 def _auth_failure_message(reason: str) -> str:
@@ -253,11 +309,7 @@ def _probe(request: dict[str, Any]) -> tuple[bool, str]:
             pass
 
     access_point = _broker_access_point(server) or server
-    logs_dir = account_dir / "logs"
-    try:
-        log_offsets = {path: path.stat().st_size for path in logs_dir.glob("*.log")}
-    except OSError:
-        log_offsets = {}
+    log_offsets = _terminal_log_offsets(account_dir)
 
     temp_dir = Path(tempfile.mkdtemp(prefix="algentra-mt5-login-"))
     ini_path = temp_dir / "login-probe.ini"
@@ -270,6 +322,7 @@ def _probe(request: dict[str, Any]) -> tuple[bool, str]:
         deadline = time.monotonic() + PROBE_TIMEOUT_SECONDS
         last_status: dict[str, Any] | None = None
         last_auth_failure: str | None = None
+        authorized_at: float | None = None
         last_terminal_exited = False
         status_path.unlink(missing_ok=True)
         ini = "\r\n".join((
@@ -318,10 +371,15 @@ def _probe(request: dict[str, Any]) -> tuple[bool, str]:
         remove_timer.start()
         try:
             while time.monotonic() < deadline:
-                status, auth_failure = _read_status([status_path], log_offsets)
+                status, auth_failure, authorized = _read_status(
+                    [status_path], log_offsets, expected_login=login,
+                )
+                if authorized and authorized_at is None:
+                    authorized_at = time.monotonic()
                 if auth_failure:
                     last_auth_failure = auth_failure
-                    break
+                    if auth_failure != "trading disabled on server":
+                        break
                 if status is not None:
                     last_status = status
                     if status.get("ready"):
@@ -335,6 +393,16 @@ def _probe(request: dict[str, Any]) -> tuple[bool, str]:
                             keep_terminal_process = bool(keep_terminal_requested and valid)
                             return valid, message[:240]
                         return False, "Terminal MT5 mengirim status login yang tidak valid."
+                if authorized_at is not None and time.monotonic() - authorized_at >= 5:
+                    keep_terminal_process = keep_terminal_requested
+                    logger.warning(
+                        "Login MT5 dikonfirmasi dari jurnal tetapi laporan Expert/chart tidak tersedia; "
+                        "broker=%s simbol=%s status_simbol=%s",
+                        server,
+                        str((last_status or {}).get("gold_symbol", "") or "tidak diketahui"),
+                        str((last_status or {}).get("gold_symbol_status", "UNAVAILABLE") or "UNAVAILABLE"),
+                    )
+                    return True, _authorized_without_probe_message(server, last_status, last_auth_failure)
                 if process.poll() is not None:
                     last_terminal_exited = True
                     break
@@ -354,7 +422,17 @@ def _probe(request: dict[str, Any]) -> tuple[bool, str]:
                 stop_terminals_in(account_dir)
 
         if last_auth_failure:
+            if last_auth_failure == "trading disabled on server" and authorized_at is not None:
+                keep_terminal_process = keep_terminal_requested
+                return True, _authorized_without_probe_message(server, last_status, last_auth_failure)
             return False, _auth_failure_message(last_auth_failure)
+        if authorized_at is not None:
+            keep_terminal_process = keep_terminal_requested
+            logger.warning(
+                "Login MT5 dikonfirmasi dari jurnal tetapi probe terminal berhenti tanpa laporan Expert; broker=%s",
+                server,
+            )
+            return True, _authorized_without_probe_message(server, last_status, None)
         if last_terminal_exited and last_status is None:
             return False, "Terminal MT5 berhenti sebelum EA probe melaporkan hasil. Periksa konfigurasi terminal dan jurnal MT5."
         if last_status and isinstance(last_status.get("message"), str):

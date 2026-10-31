@@ -529,8 +529,19 @@ class ManagedWorker:
             if not isinstance(result, dict) or not isinstance(result.get("valid"), bool) or not isinstance(result.get("message"), str):
                 return False, "Worker tidak dapat memvalidasi login pada terminal MT5."
             valid = result["valid"]
+            message = result["message"][:240]
             retained_session = bool(valid and keep_terminal)
-            return valid, result["message"][:240]
+            if valid and any(
+                marker in message.casefold()
+                for marker in ("peringatan", "belum tersedia", "belum dilaporkan", "tidak tersedia")
+            ):
+                logger.warning(
+                    "Probe login MT5 %s broker=%s berhasil dengan kesiapan simbol/chart sebagai peringatan: %s",
+                    subject,
+                    str(job.get("server", "unknown")),
+                    message,
+                )
+            return valid, message
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=2)
