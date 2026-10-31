@@ -7,11 +7,10 @@
 input string ProbeStatusFileName = "algentra-login-probe.json";
 bool g_status_write_error_logged = false;
 string g_last_status_log = "";
-bool g_gold_chart_ready = false;
 string g_gold_symbol_candidate = "";
 string g_gold_symbol_reason = "";
-datetime g_gold_chart_last_log = 0;
-datetime g_gold_chart_last_check = 0;
+datetime g_gold_symbol_last_log = 0;
+datetime g_gold_symbol_last_check = 0;
 
 string EscapeJSON(string value)
   {
@@ -95,44 +94,25 @@ bool ResolveGoldSymbol(string &resolved)
    return AlgentraResolveGoldSymbol(resolved, g_gold_symbol_reason);
   }
 
-void EnsureDefaultGoldChart()
+void RefreshGoldSymbolStatus()
   {
-   if(g_gold_chart_ready || TimeCurrent() - g_gold_chart_last_check < 10)
+   if(g_gold_symbol_candidate != "" || TimeCurrent() - g_gold_symbol_last_check < 10)
       return;
-   g_gold_chart_last_check = TimeCurrent();
+   g_gold_symbol_last_check = TimeCurrent();
 
-   if(g_gold_symbol_candidate == "")
+   if(!ResolveGoldSymbol(g_gold_symbol_candidate))
      {
-      if(!ResolveGoldSymbol(g_gold_symbol_candidate))
+      if(TimeCurrent() - g_gold_symbol_last_log >= 15)
         {
-         if(TimeCurrent() - g_gold_chart_last_log >= 15)
-           {
-            Print("[MT5LoginProbe] simbol belum tersedia; broker=", AccountInfoString(ACCOUNT_SERVER),
-                  "; status=UNAVAILABLE; ", g_gold_symbol_reason);
-            g_gold_chart_last_log = TimeCurrent();
-           }
-         return;
+         Print("[MT5LoginProbe] simbol belum tersedia; broker=", AccountInfoString(ACCOUNT_SERVER),
+               "; status=UNAVAILABLE; ", g_gold_symbol_reason,
+               "; login tetap berjalan tanpa menunggu chart emas.");
+         g_gold_symbol_last_log = TimeCurrent();
         }
-     }
-   string gold_symbol = g_gold_symbol_candidate;
-   if(_Symbol == gold_symbol && _Period == PERIOD_M1)
-     {
-      g_gold_chart_ready = true;
       return;
      }
-   ResetLastError();
-   if(ChartSetSymbolPeriod(0, gold_symbol, PERIOD_M1))
-     {
-      g_gold_chart_ready = true;
-      Print("[MT5LoginProbe] simbol XAUUSD ditemukan: ", gold_symbol,
-            "; chart dipilih dan EA probe dijalankan pada M1.");
-     }
-   else if(TimeCurrent() - g_gold_chart_last_log >= 15)
-     {
-      Print("[MT5LoginProbe] gagal mengganti chart ke ", gold_symbol,
-            "; error ", GetLastError());
-      g_gold_chart_last_log = TimeCurrent();
-     }
+   Print("[MT5LoginProbe] simbol XAUUSD ditemukan dan diaktifkan di Market Watch: ",
+         g_gold_symbol_candidate, "; login tidak bergantung pada chart simbol tersebut.");
   }
 
 int OnInit()
@@ -161,9 +141,10 @@ void OnTimer()
       message = "Login broker tersambung, tetapi izin trading Expert Advisor belum aktif.";
    else if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       message = "Login broker tersambung, tetapi izin Auto Trading terminal belum aktif.";
-   // Connection validation does not wait for symbol resolution. Resolve and select
-   // the broker's available XAUUSD variant after the live session is reported.
-   EnsureDefaultGoldChart();
+   // Resolve and select the broker's available XAUUSD variant in Market Watch,
+   // but do not change the probe chart. Login validation must not depend on a
+   // chart named XAUUSD/XAUUSDm being open or available as the startup chart.
+   RefreshGoldSymbolStatus();
    if(g_gold_symbol_candidate != "")
       message += " Simbol XAUUSD terdeteksi: " + g_gold_symbol_candidate + ".";
    else
