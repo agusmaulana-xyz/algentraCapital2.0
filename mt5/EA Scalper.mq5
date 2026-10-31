@@ -9,9 +9,10 @@
 //| CHANGELOG.md di folder project ini.                              |
 //+------------------------------------------------------------------+
 #property strict
-#property version   "3.32"
+#property version   "3.33"
 
 #include <Trade\Trade.mqh>
+#include "GoldSymbolResolver.mqh"
 CTrade trade;
 #define MAX_ACTIVE_POSITIONS 1
 
@@ -400,9 +401,8 @@ bool AccountUsesCentSymbols()
 
 double GoldPointMultiplier(const string symbol)
   {
-   string normalized=symbol;
-   StringToUpper(normalized);
-   if(StringFind(normalized,"XAUUSD")!=0) return 1.0;
+   string normalized=AlgentraNormalizeSymbol(symbol);
+   if(!AlgentraIsGoldPairRequest(symbol)) return 1.0;
    double point=SymbolInfoDouble(symbol,SYMBOL_POINT);
    if(point<=0.0) return 1.0;
    if(AccountUsesCentSymbols() || normalized=="XAUUSDC")
@@ -1195,6 +1195,33 @@ void TryEntry()
    OpenSingleEntry(signalDir,atr,reason+(isReversal?" [REVERSAL]":""),signalMode,srInvalidationLevel);
   }
 
+bool InitializeIndicators()
+  {
+   if(hEmaFast!=INVALID_HANDLE) IndicatorRelease(hEmaFast);
+   if(hEmaSlow!=INVALID_HANDLE) IndicatorRelease(hEmaSlow);
+   if(hAtr!=INVALID_HANDLE) IndicatorRelease(hAtr);
+   if(hEmaPullback!=INVALID_HANDLE) IndicatorRelease(hEmaPullback);
+   if(hEmaM1Fast!=INVALID_HANDLE) IndicatorRelease(hEmaM1Fast);
+   if(hEmaM1Slow!=INVALID_HANDLE) IndicatorRelease(hEmaM1Slow);
+   if(hAdxTrend!=INVALID_HANDLE) IndicatorRelease(hAdxTrend);
+   hEmaFast=iMA(_Symbol,InpTrendTF,InpTrendEmaFast,0,MODE_EMA,PRICE_CLOSE);
+   hEmaSlow=iMA(_Symbol,InpTrendTF,InpTrendEmaSlow,0,MODE_EMA,PRICE_CLOSE);
+   hAtr=iATR(_Symbol,InpEntryTF,InpAtrPeriod);
+   hEmaPullback=iMA(_Symbol,InpEntryTF,InpPullbackEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
+   hEmaM1Fast=iMA(_Symbol,InpEntryTF,InpM1TrendEmaFast,0,MODE_EMA,PRICE_CLOSE);
+   hEmaM1Slow=iMA(_Symbol,InpEntryTF,InpM1TrendEmaSlow,0,MODE_EMA,PRICE_CLOSE);
+   hAdxTrend=iADX(_Symbol,InpTrendTF,InpChopAdxPeriod);
+   if(hEmaFast==INVALID_HANDLE || hEmaSlow==INVALID_HANDLE || hAtr==INVALID_HANDLE || hEmaPullback==INVALID_HANDLE
+      || hEmaM1Fast==INVALID_HANDLE || hEmaM1Slow==INVALID_HANDLE || hAdxTrend==INVALID_HANDLE)
+     {
+      indicatorsReady=false;
+      return false;
+     }
+   indicatorsReady=true;
+   ResetDay();
+   return true;
+  }
+
 int OnInit()
   {
    if(InpRangeBars<2) return INIT_PARAMETERS_INCORRECT;
@@ -1241,22 +1268,29 @@ int OnInit()
    if(!InpUseFixedPointRR && (InpSLNoiseBufferATR<0 || InpSLSpreadBufferMult<0)) return INIT_PARAMETERS_INCORRECT;
    if(!InpUseFixedPointRR && SelectedTakeProfitRR()<=0) return INIT_PARAMETERS_INCORRECT;
 
+   if(!EventSetTimer(1)) return INIT_FAILED;
+   string goldSymbol, symbolReason;
+   if(!AlgentraResolveGoldSymbol(goldSymbol,symbolReason))
+     {
+      SetScanState("SYMBOL_UNAVAILABLE",symbolReason+"; login tetap aktif dan pencarian akan dicoba ulang");
+      return INIT_SUCCEEDED;
+     }
+   if(_Symbol!=goldSymbol)
+     {
+      ResetLastError();
+      if(!ChartSetSymbolPeriod(0,goldSymbol,_Period))
+         SetScanState("SYMBOL_SWITCH_FAILED",StringFormat("Gagal beralih ke simbol emas %s; error %d",goldSymbol,GetLastError()));
+      else
+         SetScanState("SYMBOL_SWITCHING",StringFormat("Mengaktifkan simbol emas broker %s",goldSymbol));
+      return INIT_SUCCEEDED;
+     }
    SymbolSelect(_Symbol,true);
-   hEmaFast=iMA(_Symbol,InpTrendTF,InpTrendEmaFast,0,MODE_EMA,PRICE_CLOSE);
-   hEmaSlow=iMA(_Symbol,InpTrendTF,InpTrendEmaSlow,0,MODE_EMA,PRICE_CLOSE);
-   hAtr=iATR(_Symbol,InpEntryTF,InpAtrPeriod);
-   hEmaPullback=iMA(_Symbol,InpEntryTF,InpPullbackEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
-   hEmaM1Fast=iMA(_Symbol,InpEntryTF,InpM1TrendEmaFast,0,MODE_EMA,PRICE_CLOSE);
-   hEmaM1Slow=iMA(_Symbol,InpEntryTF,InpM1TrendEmaSlow,0,MODE_EMA,PRICE_CLOSE);
-   hAdxTrend=iADX(_Symbol,InpTrendTF,InpChopAdxPeriod);
-   if(hEmaFast==INVALID_HANDLE || hEmaSlow==INVALID_HANDLE || hAtr==INVALID_HANDLE || hEmaPullback==INVALID_HANDLE
-      || hEmaM1Fast==INVALID_HANDLE || hEmaM1Slow==INVALID_HANDLE || hAdxTrend==INVALID_HANDLE) return INIT_FAILED;
-   indicatorsReady=true; ResetDay(); EventSetTimer(1);
+   if(!InitializeIndicators()) return INIT_FAILED;
    if(InpEnableWebsiteSync && StringLen(InpWebsiteApiKey)<24)
       Print("Website sync belum dikonfigurasi: isi InpWebsiteApiKey dengan EA_API_KEY backend. Trading tetap berjalan tanpa sync.");
    string lotMode=(InpUseRiskPercent ? StringFormat("risiko %.2f%% dari balance",InpRiskPercent) :
                    StringFormat("lot tetap %.2f",InpFixedLot));
-   SetScanState("STARTING",StringFormat("EA Scalper 3.32 siap; %s; menunggu candle baru",lotMode));
+   SetScanState("STARTING",StringFormat("EA Scalper 3.33 siap; %s; menunggu candle baru",lotMode));
    return INIT_SUCCEEDED;
   }
 
@@ -1274,12 +1308,31 @@ void OnDeinit(const int reason)
 
 void OnTimer()
   {
+   if(!indicatorsReady)
+     {
+      string goldSymbol, symbolReason;
+      if(!AlgentraResolveGoldSymbol(goldSymbol,symbolReason))
+         SetScanState("SYMBOL_UNAVAILABLE",symbolReason+"; login tetap aktif dan pencarian akan dicoba ulang");
+      else if(_Symbol!=goldSymbol)
+        {
+         ResetLastError();
+         if(!ChartSetSymbolPeriod(0,goldSymbol,_Period))
+            SetScanState("SYMBOL_SWITCH_FAILED",StringFormat("Gagal beralih ke simbol emas %s; error %d",goldSymbol,GetLastError()));
+         else
+            SetScanState("SYMBOL_SWITCHING",StringFormat("Mengaktifkan simbol emas broker %s",goldSymbol));
+        }
+      else if(InitializeIndicators())
+         SetScanState("STARTING",StringFormat("EA Scalper siap pada %s; menunggu candle baru",_Symbol));
+      WriteStatus();
+      return;
+     }
    CheckNewDay(); PollCommandFile(); WriteStatus(); SyncWebsiteTrades();
    if(lastTickTime>0 && TimeCurrent()-lastTickTime>60) SetScanState("NO_TICK","Tidak ada tick baru lebih dari 60 detik");
   }
 
 void OnTick()
   {
+   if(!indicatorsReady) return;
    lastTickTime=TimeCurrent(); CheckNewDay();
    if(InpEnableSRReversal)
      {

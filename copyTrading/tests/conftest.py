@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 def fake_mt5():
     class FakeMT5:
         POSITION_TYPE_BUY = 0
+        SYMBOL_TRADE_MODE_FULL = 4
         ACCOUNT_MARGIN_MODE_RETAIL_HEDGING = 2
         TRADE_ACTION_DEAL = 1
         TRADE_ACTION_SLTP = 6
@@ -52,6 +53,23 @@ def fake_mt5():
 
         def symbol_info(self, symbol):
             return self.info
+
+        def symbols_get(self):
+            name = getattr(self.info, "name", None) or "XAUUSD"
+            is_gold = name.upper().startswith("XAUUSD")
+            return (SimpleNamespace(
+                **{
+                    **self.info.__dict__,
+                    "name": name,
+                    "visible": True,
+                    "select": True,
+                    "trade_mode": 4,
+                    "currency_base": "XAU" if is_gold else "EUR",
+                    "currency_profit": "USD",
+                    "description": "Gold vs US Dollar" if is_gold else "Euro vs US Dollar",
+                    "expiration_time": 0,
+                }
+            ),)
 
         def symbol_select(self, symbol, enabled):
             return True

@@ -1,5 +1,5 @@
 #property strict
-#property version   "1.106"
+#property version   "1.107"
 #property description "Executes Telegram signals, reports master MT5 balance, and publishes all open positions"
 
 #define MAX_SIGNAL_TARGETS 20
@@ -7,6 +7,7 @@
 #define PENDING_ORDER_EXPIRY_MINUTES 60
 
 #include <Trade/Trade.mqh>
+#include "GoldSymbolResolver.mqh"
 
 enum ENUM_LOT_MODE
   {
@@ -28,8 +29,8 @@ input bool AllowSell = true;
 input bool ForceFixedSLTP = true; // aktif: paksa SL/TP tetap untuk semua sinyal, termasuk yang sudah mencantumkan level
 input int FixedSLPoints = 1000;
 input int FixedTPPoints = 2000;
-input string SymbolSuffix = "";
-input string SymbolMapCsv = ""; // Optional source-to-broker mapping, e.g. XAUUSD=XAUUSDc,US30=US30.cash
+input string SymbolSuffix = ""; // Optional mapping for non-gold instruments; XAUUSD resolves automatically
+input string SymbolMapCsv = ""; // Optional non-gold mapping, e.g. US30=US30.cash; XAUUSD is automatic
 input string MarketWatchlistCsv = "XAUUSD,EURUSD,USDJPY,GBPUSD";
 input double MaxMarketDeviationPct = 5.0;
 input int MaxRetries = 3;
@@ -146,6 +147,11 @@ bool ResolveBrokerSymbol(const string requested, const string suffix, const stri
       return false;
      }
 
+   // Gold source symbols are canonicalized and resolved from this terminal's
+   // complete broker catalog. Ignore legacy suffix/map settings for XAUUSD.
+   if(AlgentraIsGoldPairRequest(source))
+      return AlgentraResolveGoldSymbol(resolved, reason);
+
    string mapped = "";
    string mappings[];
    int mapping_count = StringSplit(mapping_csv, ',', mappings);
@@ -184,12 +190,6 @@ bool ResolveBrokerSymbol(const string requested, const string suffix, const stri
    if(suffix != "" && TrySelectBrokerSymbol(source + suffix, resolved))
       return true;
 
-   string source_upper = source;
-   StringToUpper(source_upper);
-   // Telegram signals usually identify gold as XAUUSD. On a cent account,
-   // prefer XAUUSDc even if other XAUUSD variants are also listed.
-   if(source_upper == "XAUUSD" && AccountUsesCentSymbols() && TrySelectBrokerSymbol("XAUUSDc", resolved))
-      return true;
    if(TrySelectBrokerSymbol(source, resolved))
       return true;
 
@@ -226,9 +226,6 @@ bool ResolveBrokerSymbol(const string requested, const string suffix, const stri
      }
    if(matches > 1)
      {
-      if(AccountUsesCentSymbols() && StringFind(source_upper, "XAUUSD") == 0 &&
-         TrySelectBrokerSymbol("XAUUSDc", resolved))
-         return true;
       reason = StringFormat("symbol %s matches multiple broker instruments (%s); configure SymbolSuffix or SymbolMapCsv", source, match_list);
       return false;
      }
@@ -614,23 +611,20 @@ bool FindExistingSignalOrder(const long signal_id, long &ticket_out, double &lot
 
 bool IsXauUsdSymbol(const string symbol)
   {
-   string normalized = symbol;
-   StringToUpper(normalized);
-   return StringFind(normalized, "XAUUSD") == 0;
+   return AlgentraIsGoldPairRequest(symbol);
   }
 
 double GoldPointMultiplier(const string symbol)
   {
    if(!IsXauUsdSymbol(symbol))
       return 1.0;
-   string normalized = symbol;
-   StringToUpper(normalized);
+   string normalized = AlgentraNormalizeSymbol(symbol);
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    if(point <= 0.0)
       return 1.0;
    // Keep gold point-based inputs comparable when a cent account quotes
    // XAUUSDc with one extra decimal place.
-   if(AccountUsesCentSymbols() || normalized == "XAUUSDC")
+      if(AccountUsesCentSymbols() || normalized == "XAUUSDC")
       return MathMax(1.0, 0.01 / point);
    return 1.0;
   }

@@ -46,7 +46,7 @@ $env:MT5_PASS_AKUN1 = "password-akun-demo"
 
 Password hanya dibaca dari environment variable yang disebut oleh `password_env`; jangan menaruh password di JSON, argumen proses, atau log. Untuk Task Scheduler, siapkan environment variable pada akun Windows yang menjalankan task.
 
-Atur `terminal_path` dan `folder_sinyal` di master dan follower. Gunakan folder sinyal yang sama pada semua config. Jika broker memakai nama simbol berbeda, isi `map_simbol`, misalnya `{"XAUUSD":"XAUUSDm"}`. Lot dapat memakai `tetap`, `rasio`, atau `saldo`; isi `saldo_master` untuk mode saldo. Config follower wajib menetapkan `max_lot_per_order`, `max_posisi_terbuka`, dan `max_lot_total`. Contoh follower mengaktifkan `dry_run: true`; sesuaikan semua batas dengan akun.
+Atur `terminal_path` dan `folder_sinyal` di master dan follower. Gunakan folder sinyal yang sama pada semua config. Pasangan emas XAUUSD dipetakan otomatis ke simbol broker lokal (suffix seperti `m`, `c`, `.c`, atau alias `GOLD` tidak perlu diatur). Gunakan `map_simbol` hanya untuk instrumen non-emas yang memang membutuhkan pemetaan khusus. Lot dapat memakai `tetap`, `rasio`, atau `saldo`; isi `saldo_master` untuk mode saldo. Config follower wajib menetapkan `max_lot_per_order`, `max_posisi_terbuka`, dan `max_lot_total`. Contoh follower mengaktifkan `dry_run: true`; sesuaikan semua batas dengan akun.
 
 ## Menjalankan
 

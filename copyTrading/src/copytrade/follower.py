@@ -19,7 +19,7 @@ from .mt5_runtime import restart_portable_terminal, start_portable_terminal
 from .protocol import Signal, parse_signal
 from .signal_io import read_new, signal_path
 from .state import load_state, save_state
-from .symbol_map import map_symbol, select_symbol
+from .symbol_map import CANONICAL_GOLD, SymbolResolver, map_symbol, select_symbol
 
 logger = logging.getLogger("follower")
 
@@ -57,6 +57,7 @@ class FollowerEngine:
         self.state_path = Path(state_path)
         self.logger = logger_ or logger
         self.account_info: Any = None
+        self.symbol_resolver = SymbolResolver(mt5, logger_=self.logger)
         self.state = load_state(state_path)
         self.processed = set(str(item) for item in self.state.get("processed", []))
         previous_copy_error = str(self.state.get("copy_error") or "")
@@ -155,6 +156,8 @@ class FollowerEngine:
                 "Terminal MT5 terhubung ke server broker lain; login otomatis dibatalkan agar sesi tidak berganti."
             )
         self.account_info = account
+        broker = str(_get(account, "server", "") or self.config.get("server") or "unknown")
+        self.symbol_resolver.reset(account=account, broker=broker)
         hedging = getattr(self.mt5, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2)
         if _get(account, "margin_mode") != hedging:
             self.logger.error("PERINGATAN KERAS: akun netting; pemetaan satu posisi ke satu ticket tidak akurat")
@@ -174,20 +177,18 @@ class FollowerEngine:
             if actual_path != expected_path:
                 self.mt5.shutdown()
                 raise RuntimeError("MT5 Python tersambung ke terminal lain; akun utama tidak akan dipakai sebagai follower.")
-        try:
-            for master_symbol, requested in list(self.config.get("map_simbol", {}).items()):
-                resolved = select_symbol(self.mt5, str(requested), account)
-                self.config["map_simbol"][master_symbol] = resolved
-                if resolved != str(requested):
-                    self.logger.info(
-                        "Simbol broker otomatis dipilih %s -> %s (akun %s)",
-                        requested,
-                        resolved,
-                        str(_get(account, "currency", "")) or "cent/regular",
-                    )
-        except Exception:
-            self.mt5.shutdown()
-            raise
+        # Symbol discovery is a trading readiness warning, not an account-login
+        # condition. A missing gold market is retried by loop_once().
+        resolved_gold = self.symbol_resolver.refresh(force=True)
+        if resolved_gold:
+            self.config.setdefault("map_simbol", {})[CANONICAL_GOLD] = resolved_gold
+            if (self.last_copy_error or "").startswith("Simbol emas XAUUSD belum tersedia"):
+                self._set_copy_error(None)
+        else:
+            self.config.setdefault("map_simbol", {})[CANONICAL_GOLD] = CANONICAL_GOLD
+            self._set_copy_error(
+                f"Simbol emas XAUUSD belum tersedia di broker {broker}; login tetap aktif dan pencarian diulang berkala."
+            )
         self.logger.info("Terhubung ke akun follower %s", self.config["nama"])
         self.reconcile(force=True)
 
@@ -391,7 +392,16 @@ class FollowerEngine:
         if key in self.positions:
             return "lewati_sudah_terpetakan"
         requested_symbol = map_symbol(str(signal.simbol), self.config)
-        symbol = select_symbol(self.mt5, requested_symbol, self.account_info)
+        if requested_symbol == CANONICAL_GOLD:
+            symbol = self.symbol_resolver.resolve(requested_symbol)
+            if symbol is None:
+                self.logger.warning(
+                    "Order copy dilewati karena simbol emas belum tersedia broker=%s",
+                    self.symbol_resolver.broker,
+                )
+                return "lewati_simbol_belum_tersedia"
+        else:
+            symbol = select_symbol(self.mt5, requested_symbol, self.account_info)
         if symbol != requested_symbol:
             self.config.setdefault("map_simbol", {})[str(signal.simbol)] = symbol
             self.logger.info("Simbol sinyal %s diarahkan otomatis ke %s", requested_symbol, symbol)
@@ -827,6 +837,11 @@ class FollowerEngine:
         return [item[2] for item in candidates[:100]]
 
     def loop_once(self, *, today: date | None = None) -> int:
+        if self.symbol_resolver.resolved is None:
+            resolved = self.symbol_resolver.refresh()
+            if resolved:
+                if (self.last_copy_error or "").startswith("Simbol emas XAUUSD belum tersedia"):
+                    self._set_copy_error(None)
         self.reconcile()
         now = time.monotonic()
         if not self.config.get("aktif", True):

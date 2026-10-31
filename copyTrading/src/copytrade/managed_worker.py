@@ -401,7 +401,9 @@ class ManagedWorker:
             "password_env": password_env,
             "server": str(job["server"]),
             "folder_sinyal": self.signal_dir,
-            "map_simbol": {"XAUUSD": str(job["follower_symbol"])},
+            # The source pair is canonical. FollowerEngine resolves the broker's
+            # local gold name from the MT5 catalog after attaching to the login.
+            "map_simbol": {"XAUUSD": "XAUUSD"},
             "mode_lot": job["mode_lot"],
             "rasio_lot": float(job["ratio_lot"]),
             "lot_tetap": float(job["lot_tetap"]),

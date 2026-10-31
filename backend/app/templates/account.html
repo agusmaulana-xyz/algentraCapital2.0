@@ -500,9 +500,6 @@ function addManagedAccountCard(card, account, plan) {
     fields.broker_password.required = true;
     fields.broker_password.placeholder = "Password trading akun follower";
   }
-  addInput("follower_symbol", "Simbol emas di broker", "text", profile.follower_symbol || "XAUUSD");
-  fields.follower_symbol.maxLength = 64;
-  fields.follower_symbol.pattern = "[A-Za-z0-9._-]+";
   const modeLabel = document.createElement("label"); modeLabel.textContent = "Metode ukuran lot";
   const mode = document.createElement("select"); mode.name = "mode_lot";
   for (const [value, label] of [["rasio", "Rasio terhadap lot sumber"], ["tetap", "Lot tetap"]]) {
@@ -603,7 +600,7 @@ function addAccountCard(account) {
   };
   const connectionStatus = statusLabels[account.connection_status] ? account.connection_status : "offline";
   const connectionState = document.createElement("div");
-  connectionState.className = `account-state account-state--${account.copy_error ? "offline" : connectionStatus}`;
+  connectionState.className = `account-state account-state--${account.copy_error ? "warning" : connectionStatus}`;
   connectionState.setAttribute("role", "status");
   const dot = document.createElement("span"); dot.className = "account-state__dot"; dot.textContent = connectionStatus === "ready" ? "✓" : ""; dot.setAttribute("aria-hidden", "true");
   const message = document.createElement("span"); message.textContent = account.copy_error || statusLabels[connectionStatus];

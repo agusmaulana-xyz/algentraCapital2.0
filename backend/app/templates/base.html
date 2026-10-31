@@ -109,9 +109,11 @@
     .account-state--offline .account-state__dot { background: #e18181; }
     .account-state--disabled .account-state__dot { background: #829099; }
     .account-state--trading_disabled .account-state__dot, .account-state--not_real_account .account-state__dot { background: #e7bb5b; }
+    .account-state--warning .account-state__dot { background: #e7bb5b; }
     .account-state--ready { color: #83e3a8; }
     .account-state--waiting_for_source { color: #ead18f; }
     .account-state--offline { color: #e8a2a2; }
+    .account-state--warning { color: #e7bb5b; }
     .account-state--disabled { color: var(--muted); }
     .account-state--trading_disabled, .account-state--not_real_account { color: #ead18f; }
     .account-login-check { margin: 8px 0; font-size: 12px; }
@@ -184,6 +186,7 @@
     :root[data-theme="light"] .account-state--waiting_for_source, :root[data-theme="light"] .account-state--trading_disabled,
     :root[data-theme="light"] .account-state--not_real_account { color:#765600; }
     :root[data-theme="light"] .account-state--offline { color:#922b2b; }
+    :root[data-theme="light"] .account-state--warning { color:#795400; }
     :root[data-theme="light"] button.danger { color:#7f1d1d; background:#fee2e2; border-color:#d99a9a; }
     :root[data-theme="light"] .music-toggle { color:var(--ink); background:var(--glass-raised); border-color:var(--line); box-shadow:var(--shadow-soft); }
     :root[data-theme="light"] .music-toggle:hover { color:var(--ink); border-color:var(--control); }

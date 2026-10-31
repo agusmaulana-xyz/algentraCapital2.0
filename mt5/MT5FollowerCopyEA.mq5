@@ -1,8 +1,9 @@
 #property strict
-#property version   "1.103"
+#property version   "1.104"
 #property description "Copies all published Algentra positions and reports MT5 account history"
 
 #include <Trade/Trade.mqh>
+#include "GoldSymbolResolver.mqh"
 
 input string ServerURL = "http://127.0.0.1:8000";
 input string AccountToken = "";
@@ -11,8 +12,8 @@ input long MagicNumber = 26100301;
 input double VolumeMultiplier = 1.0;
 input double MaxEntryDeviationPercent = 0.0; // 0 disables the late-entry gate for existing master positions
 input int MaxSlippagePoints = 20;
-input string SymbolSuffix = "";
-input string SymbolMapCsv = ""; // Optional source-to-broker mapping, e.g. XAUUSDc=GOLD
+input string SymbolSuffix = ""; // Optional mapping for non-gold instruments; XAUUSD resolves automatically
+input string SymbolMapCsv = ""; // Optional non-gold mapping; XAUUSD is automatic
 
 CTrade g_trade;
 string g_connection_status = "starting";
@@ -195,6 +196,17 @@ bool ResolveBrokerSymbol(const string requested, const string suffix, const stri
    if(StringLen(source) == 0)
      {
       reason = "master symbol is empty";
+      return false;
+     }
+
+   // The source can carry the master's broker suffix. Normalize gold to the
+   // canonical pair, then map it to this follower terminal's cached symbol.
+   if(AlgentraIsGoldPairRequest(source))
+      return AlgentraResolveGoldSymbol(resolved, reason);
+   string normalized_source = AlgentraNormalizeSymbol(source);
+   if(StringFind(normalized_source, "XAU") == 0 || StringFind(normalized_source, "GOLD") == 0)
+     {
+      reason = "source instrument is not the canonical XAUUSD spot pair";
       return false;
      }
 

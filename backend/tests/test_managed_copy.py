@@ -9,6 +9,7 @@ from app.main import app
 from app.models import AppSetting, ClientUser, ManagedCopyProfile, MT5Account, PaymentOrder, PendingMT5Verification, utc_now
 from app.payment_bot import review_payment_order
 from app.routers import mt5 as mt5_router
+from app.schemas import ManagedCopySetup
 from app.token_crypto import decrypt_managed_copy_password
 
 
@@ -146,6 +147,7 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
         )
         assert setup.status_code == 200
         assert setup.json()["configured"] is True
+        assert setup.json()["follower_symbol"] == "XAUUSD"
         assert "broker_password" not in setup.json()
         assert setup.json()["login_status"] == "CHECKING"
 
@@ -225,7 +227,7 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
         assert started.json()["active"] is True
         jobs = client.get("/api/mt5/copier/jobs", headers=worker_headers)
         assert jobs.json()["jobs"][0]["broker_password"] == "broker-secret-for-test"
-        assert jobs.json()["jobs"][0]["follower_symbol"] == "XAUUSDm"
+        assert jobs.json()["jobs"][0]["follower_symbol"] == "XAUUSD"
         assert client.post(
             f"/api/mt5/copier/jobs/{account_id}/status",
             headers=worker_headers,
@@ -357,3 +359,34 @@ def test_managed_copy_client_setup_worker_auth_and_live_acknowledgement(monkeypa
             db.query(PaymentOrder).filter_by(id=ea_order_id).delete()
             db.query(ClientUser).filter_by(email=email).delete()
             db.commit()
+
+
+def test_managed_copy_ignores_legacy_manual_gold_mapping(monkeypatch):
+    profile = ManagedCopyProfile(
+        account_id=2,
+        password_ciphertext="encrypted-password",
+        follower_symbol="XAUUSDm",
+        mode_lot="rasio",
+        ratio_lot=1.0,
+        lot_tetap=0.01,
+        login_status="CHECKING",
+        status="STARTING",
+        active=False,
+        updated_at=utc_now(),
+    )
+
+    class MemorySession:
+        def get(self, _model, _account_id):
+            return profile
+
+        def commit(self):
+            return None
+
+    account = SimpleNamespace(id=2, execution_mode="MANAGED")
+    monkeypatch.setattr(mt5_router, "_owned_account", lambda _db, _owner_id, _id: account)
+    payload = ManagedCopySetup(follower_symbol="XAUUSDm", mode_lot="rasio")
+
+    result = mt5_router.configure_managed_copy(2, payload, owner_id=1, db=MemorySession())
+
+    assert profile.follower_symbol == "XAUUSD"
+    assert result["follower_symbol"] == "XAUUSD"

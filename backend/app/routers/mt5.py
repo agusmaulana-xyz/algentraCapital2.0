@@ -374,7 +374,9 @@ def _managed_copy_payload(profile: ManagedCopyProfile | None) -> dict[str, objec
         "active": profile.active,
         "login_status": profile.login_status,
         "login_message": profile.login_message,
-        "follower_symbol": profile.follower_symbol,
+        # Kept in the response for older clients; local broker suffixes are now
+        # resolved automatically from the connected MT5 terminal.
+        "follower_symbol": "XAUUSD",
         "status": status,
         "status_message": profile.status_message,
         "last_seen_at": wib_iso(profile.last_seen_at),
@@ -404,7 +406,10 @@ def configure_managed_copy(
         raise HTTPException(status_code=422, detail="Password trading broker diperlukan untuk menghubungkan akun pertama kali")
     if profile is not None and payload.broker_password:
         raise HTTPException(status_code=422, detail="Password broker hanya dapat diisi saat menghubungkan akun pertama kali")
-    values = payload.model_dump(exclude={"broker_password"})
+    values = payload.model_dump(exclude={"broker_password", "follower_symbol"})
+    # Accept a legacy client payload without letting a manual suffix affect
+    # master-to-follower pair mapping.
+    values["follower_symbol"] = "XAUUSD"
     if profile is None:
         profile = ManagedCopyProfile(
             account_id=account.id,
@@ -512,7 +517,7 @@ def list_managed_copy_jobs(
             "broker_password": password,
             "active": profile.active,
             "prepayment_check_id": profile.prepayment_check_id,
-            "follower_symbol": profile.follower_symbol,
+            "follower_symbol": "XAUUSD",
             "mode_lot": profile.mode_lot,
             "ratio_lot": profile.ratio_lot,
             "lot_tetap": profile.lot_tetap,
